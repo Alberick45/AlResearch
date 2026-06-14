@@ -1,0 +1,6 @@
+{
+  "appId": "com.researchvault.app",
+  "appName": "Research Vault",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

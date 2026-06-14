@@ -146,6 +146,27 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  // Nextcloud WebDAV Sync States
+  const [ncUrl, setNcUrl] = useState(() => localStorage.getItem("rkv_nc_url") || "");
+  const [ncUser, setNcUser] = useState(() => localStorage.getItem("rkv_nc_user") || "");
+  const [ncPass, setNcPass] = useState(() => localStorage.getItem("rkv_nc_pass") || "");
+  const [ncPath, setNcPath] = useState(() => localStorage.getItem("rkv_nc_path") || "vault_backup.json");
+  const [syncStatus, setSyncStatus] = useState("Idle");
+  const [lastSync, setLastSync] = useState(() => localStorage.getItem("rkv_nc_last_sync") || "");
+
+  useEffect(() => {
+    localStorage.setItem("rkv_nc_url", ncUrl);
+  }, [ncUrl]);
+  useEffect(() => {
+    localStorage.setItem("rkv_nc_user", ncUser);
+  }, [ncUser]);
+  useEffect(() => {
+    localStorage.setItem("rkv_nc_pass", ncPass);
+  }, [ncPass]);
+  useEffect(() => {
+    localStorage.setItem("rkv_nc_path", ncPath);
+  }, [ncPath]);
+
   // Settings PIN Change Drafts
   const [oldPinInput, setOldPinInput] = useState("");
   const [newPinInput, setNewPinInput] = useState("");
@@ -329,6 +350,99 @@ export default function App() {
       }
     };
     reader.readAsText(file);
+  };
+
+  /* --- Nextcloud WebDAV Sync System --- */
+  const getNextcloudHeaders = () => {
+    return {
+      "Authorization": "Basic " + btoa(`${ncUser}:${ncPass}`),
+      "Content-Type": "application/json"
+    };
+  };
+
+  const getNextcloudUrl = () => {
+    let base = ncUrl.trim();
+    if (!base) return "";
+    if (!base.endsWith("/")) base += "/";
+    return `${base}${ncPath.trim() || "vault_backup.json"}`;
+  };
+
+  const syncToNextcloud = async () => {
+    const url = getNextcloudUrl();
+    if (!url) {
+      setAlertDialog({ message: "Please configure your Nextcloud WebDAV URL in Settings first." });
+      return;
+    }
+    setSyncStatus("Syncing");
+    const data = {
+      topics,
+      unsortedResources,
+      recentlyViewed
+    };
+    try {
+      const response = await fetch(url, {
+        method: "PUT",
+        headers: getNextcloudHeaders(),
+        body: JSON.stringify(data, null, 2)
+      });
+      if (response.ok) {
+        const timeStr = new Date().toLocaleTimeString();
+        setSyncStatus("Success");
+        setLastSync(timeStr);
+        localStorage.setItem("rkv_nc_last_sync", timeStr);
+        showToast("Vault successfully uploaded to Nextcloud!");
+      } else {
+        setSyncStatus("Error");
+        setAlertDialog({ message: `Failed to upload to Nextcloud. Server responded with status: ${response.status}` });
+      }
+    } catch (err) {
+      setSyncStatus("Error");
+      setAlertDialog({ message: `Sync connection error: ${err.message}` });
+    }
+  };
+
+  const syncFromNextcloud = async () => {
+    const url = getNextcloudUrl();
+    if (!url) {
+      setAlertDialog({ message: "Please configure your Nextcloud WebDAV URL in Settings first." });
+      return;
+    }
+    setSyncStatus("Syncing");
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: getNextcloudHeaders()
+      });
+      if (response.ok) {
+        const parsed = await response.json();
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          if (parsed.topics) setTopics(parsed.topics);
+          if (parsed.unsortedResources) setUnsortedResources(parsed.unsortedResources);
+          if (parsed.recentlyViewed) setRecentlyViewed(parsed.recentlyViewed);
+          if (parsed.topics && parsed.topics.length > 0) {
+            setActiveTopicId(parsed.topics[0].id);
+            setActiveView("topic");
+          }
+          const timeStr = new Date().toLocaleTimeString();
+          setSyncStatus("Success");
+          setLastSync(timeStr);
+          localStorage.setItem("rkv_nc_last_sync", timeStr);
+          showToast("Vault successfully pulled from Nextcloud!");
+        } else {
+          setSyncStatus("Error");
+          setAlertDialog({ message: "Remote sync payload has an invalid format." });
+        }
+      } else if (response.status === 404) {
+        setSyncStatus("Idle");
+        setAlertDialog({ message: "No remote backup file found on Nextcloud yet. Push your local data first." });
+      } else {
+        setSyncStatus("Error");
+        setAlertDialog({ message: `Failed to download from Nextcloud. Server status: ${response.status}` });
+      }
+    } catch (err) {
+      setSyncStatus("Error");
+      setAlertDialog({ message: `Sync connection error: ${err.message}` });
+    }
   };
 
   /* --- Authentication Handlers --- */
@@ -2464,6 +2578,58 @@ export default function App() {
               </div>
 
               <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Nextcloud Private Cloud Sync</h4>
+                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
+                  <input
+                    type="text"
+                    placeholder="WebDAV URL (e.g. https://domain.com/remote.php/dav/files/user/)"
+                    className="form-input"
+                    value={ncUrl}
+                    onChange={(e) => setNcUrl(e.target.value)}
+                  />
+                  <div style={{ display: "flex", gap: "8px" }}>
+                    <input
+                      type="text"
+                      placeholder="Username"
+                      className="form-input"
+                      style={{ flex: 1 }}
+                      value={ncUser}
+                      onChange={(e) => setNcUser(e.target.value)}
+                    />
+                    <input
+                      type="password"
+                      placeholder="App Password"
+                      className="form-input"
+                      style={{ flex: 1 }}
+                      value={ncPass}
+                      onChange={(e) => setNcPass(e.target.value)}
+                    />
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Backup Path (e.g. vault_backup.json)"
+                    className="form-input"
+                    value={ncPath}
+                    onChange={(e) => setNcPath(e.target.value)}
+                  />
+                </div>
+                
+                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                  <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={syncToNextcloud} disabled={syncStatus === "Syncing"}>
+                    Push to Cloud
+                  </button>
+                  <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-brass)", color: "black" }} onClick={syncFromNextcloud} disabled={syncStatus === "Syncing"}>
+                    Pull from Cloud
+                  </button>
+                </div>
+                
+                <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--text-dim)", display: "flex", justifyContent: "space-between" }}>
+                  <span>Status: <strong>{syncStatus}</strong></span>
+                  {lastSync && <span>Last sync: <strong>{lastSync}</strong></span>}
+                </div>
+              </div>
+
+              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
                 <h4 style={{ fontSize: "13px", fontWeight: "600", color: "var(--accent-garnet)", marginBottom: "8px" }}>Danger Zone</h4>
                 <button className="btn-solid" style={{ background: "var(--accent-garnet)", color: "white", width: "100%" }} onClick={handleClearAllData}>
                   Clear All Vault Data
@@ -2500,6 +2666,18 @@ export default function App() {
               <p style={{ color: "var(--text-secondary)" }}>
                 Use the Export and Import buttons in the sidebar or the Settings menu to backup your research catalog to a JSON file.
               </p>
+
+              <h4 style={{ fontWeight: "600", marginTop: "10px" }}>Nextcloud Private Cloud Setup</h4>
+              <p style={{ color: "var(--text-secondary)" }}>
+                To synchronize your vault across your devices (phone, desktop) while maintaining complete privacy:
+              </p>
+              <ol style={{ paddingLeft: "20px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                <li>Download the Web Installer script (<code>setup-nextcloud.php</code>) from the Nextcloud official website.</li>
+                <li>Upload <code>setup-nextcloud.php</code> to your web hosting server space.</li>
+                <li>Open the file in your browser (e.g. <code>https://your-hosting.com/setup-nextcloud.png</code>) to run the configuration wizard.</li>
+                <li>Go to your user security settings and create a dedicated <strong>App Password</strong>.</li>
+                <li>Copy the WebDAV URL (looks like <code>https://domain.com/remote.php/dav/files/user/</code>) and paste it along with your Username and App Password into the app's Settings sync panel.</li>
+              </ol>
             </div>
           </div>
         </div>
