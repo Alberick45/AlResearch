@@ -549,6 +549,7 @@ export default function App() {
   const [aboutCollapsed, setAboutCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileSecondaryOpen, setMobileSecondaryOpen] = useState(false);
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
 
   // Theme Toggling State
   const [theme, setTheme] = useState(() => localStorage.getItem("rkv_theme") || "dark");
@@ -1954,20 +1955,133 @@ export default function App() {
         </div>
       )}
 
-      {/* Mobile Topbar */}
+      {/* ── MOBILE HEADER ──────────────────────────────────────────── */}
       <div className="mobile-topbar">
-        <button className="mobile-hamburger-btn" onClick={() => setMobileSidebarOpen(!mobileSidebarOpen)} title="Toggle Navigation">
+        <button className="mobile-header-btn" onClick={() => { setMobileSidebarOpen(!mobileSidebarOpen); }} title="Menu">
           <BookOpen size={20} />
         </button>
-        <span className="serif" style={{ fontSize: "16px", fontWeight: "600" }}>
+        <span className="mobile-topbar-title serif">
           {activeView === "topic" && activeTopic ? activeTopic.name : "Research Vault"}
         </span>
+        <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <button className="mobile-header-btn" onClick={() => setMobileSearchOpen(true)} title="Search">
+            <Search size={18} />
+          </button>
+          <div
+            className="user-profile-avatar"
+            style={{ width: 30, height: 30, fontSize: "12px", cursor: "pointer" }}
+            onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
+          >
+            {currentUser?.charAt(0).toUpperCase()}
+          </div>
+        </div>
       </div>
 
-      {/* Mobile Sidebar Backdrop Overlay */}
-      {mobileSidebarOpen && (
-        <div className="drawer-overlay" style={{ zIndex: 38 }} onClick={() => { setMobileSidebarOpen(false); }} />
+      {/* ── MOBILE SEARCH OVERLAY ──────────────────────────────────── */}
+      {mobileSearchOpen && (
+        <div className="mobile-search-overlay">
+          <div className="mobile-search-header">
+            <div className="search-input-wrapper" style={{ flex: 1 }}>
+              <Search size={15} className="search-input-icon" />
+              <input
+                autoFocus
+                type="text"
+                placeholder="Search topics, resources, notes..."
+                className="search-input-field"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); setSearchFocused(true); }}
+              />
+              {searchQuery && (
+                <button onClick={() => setSearchQuery("")} style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer", display: "flex" }}>
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+            <button className="mobile-header-btn" onClick={() => { setMobileSearchOpen(false); setSearchQuery(""); setSearchFocused(false); }}>
+              Cancel
+            </button>
+          </div>
+          {searchResults && (
+            <div className="mobile-search-results">
+              {Object.entries(searchResults).map(([section, items]) => {
+                if (items.length === 0) return null;
+                return (
+                  <div key={section} className="search-results-section">
+                    <div className="search-section-header">{section}</div>
+                    {items.map((item, idx) => (
+                      <button
+                        key={idx}
+                        className="search-result-item"
+                        onClick={() => {
+                          if (item.topicId === "unsorted") { setActiveView("unsorted"); }
+                          else { setActiveTopicId(item.topicId); setActiveView("topic"); setActiveTab(item.tab || "Overview"); }
+                          setSearchQuery(""); setSearchFocused(false); setMobileSearchOpen(false);
+                        }}
+                      >
+                        <span className="search-item-title">{item.match}</span>
+                        <span className="search-item-topic">{item.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {searchQuery && !searchResults && (
+            <div style={{ padding: "32px 20px", textAlign: "center", color: "var(--text-dim)", fontSize: "14px" }}>
+              No results for "{searchQuery}"
+            </div>
+          )}
+          {!searchQuery && (
+            <div style={{ padding: "32px 20px", textAlign: "center", color: "var(--text-dim)", fontSize: "13px" }}>
+              Search across all topics, resources, notes, and discoveries
+            </div>
+          )}
+        </div>
       )}
+
+      {/* ── MOBILE SIDEBAR BACKDROP ────────────────────────────────── */}
+      {mobileSidebarOpen && (
+        <div className="drawer-overlay" style={{ zIndex: 48 }} onClick={() => setMobileSidebarOpen(false)} />
+      )}
+
+      {/* ── MOBILE BOTTOM NAV ──────────────────────────────────────── */}
+      <nav className="mobile-bottom-nav">
+        <button
+          className={`mobile-nav-item ${activeView === "all-topics" ? "active" : ""}`}
+          onClick={() => { setActiveView("all-topics"); setMobileSidebarOpen(false); }}
+        >
+          <BookOpen size={20} />
+          <span>Topics</span>
+        </button>
+        <button
+          className={`mobile-nav-item ${activeView === "recently-viewed" ? "active" : ""}`}
+          onClick={() => { setActiveView("recently-viewed"); setMobileSidebarOpen(false); }}
+        >
+          <Clock size={20} />
+          <span>Recent</span>
+        </button>
+        <button
+          className="mobile-nav-item mobile-nav-capture"
+          onClick={() => { setCaptureMode("discovery"); setCaptureOpen(true); }}
+        >
+          <Plus size={24} />
+        </button>
+        <button
+          className={`mobile-nav-item ${activeView === "unsorted" ? "active" : ""}`}
+          onClick={() => { setActiveView("unsorted"); setMobileSidebarOpen(false); }}
+        >
+          <Database size={20} />
+          <span>Unsorted</span>
+        </button>
+        <button
+          className="mobile-nav-item"
+          onClick={() => { setSettingsModalOpen(true); refreshStorageInfo(); }}
+        >
+          <Settings size={20} />
+          <span>Settings</span>
+        </button>
+      </nav>
 
       {/* 1. SIDEBAR PANEL */}
       <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""} ${mobileSidebarOpen ? "mobile-open" : ""}`}>
