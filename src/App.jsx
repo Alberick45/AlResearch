@@ -3,8 +3,8 @@ import {
   Search, Plus, X, Link2, Youtube, FileText, Image as ImageIcon,
   BookMarked, FlaskConical, MessageCircle, CheckCircle2, Circle,
   Lock, Globe2, Sparkles, ChevronRight, Star, Moon, Sun, HelpCircle,
-  Settings, Bell, Edit3, Trash2, Shield, Eye, Database, FileUp, FileDown,
-  Unlock, UserPlus, LogOut, Key, User, BookOpen, Clock, Video
+  Settings, Bell, Edit3, Trash2, Shield, Eye, Database, FileUp, FileDown, Info,
+  Unlock, UserPlus, LogOut, Key, User, BookOpen, Clock, Video, Mic, Users
 } from "lucide-react";
 
 /* ------------------------------------------------------------------ */
@@ -33,6 +33,8 @@ const TYPE_ICON = {
   Image: ImageIcon,
   "Personal Conversation": MessageCircle,
   Video: Video,
+  Audio: Mic,
+  Discussion: Users,
 };
 
 function fmtDate(iso) {
@@ -41,8 +43,429 @@ function fmtDate(iso) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
-let _id = 8000;
-const nextId = (prefix) => `${prefix}${_id++}`;
+function parseChatLog(rawText) {
+  if (!rawText) return [];
+  const lines = rawText.split("\n");
+  const messages = [];
+  
+  const bracketPattern = /^\[([^\]]+)\]\s*([^:]+):\s*(.*)$/;
+  const dashPattern = /^([^\-]+)\s*-\s*([^:]+):\s*(.*)$/;
+  const simplePattern = /^([^:\n]+):\s*(.*)$/;
+  
+  let currentMsg = null;
+
+  for (let line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    
+    let match = line.match(bracketPattern);
+    if (match) {
+      if (currentMsg) messages.push(currentMsg);
+      currentMsg = {
+        timestamp: match[1].trim(),
+        sender: match[2].trim(),
+        text: match[3].trim()
+      };
+      continue;
+    }
+    
+    match = line.match(dashPattern);
+    if (match) {
+      if (currentMsg) messages.push(currentMsg);
+      currentMsg = {
+        timestamp: match[1].trim(),
+        sender: match[2].trim(),
+        text: match[3].trim()
+      };
+      continue;
+    }
+
+    match = line.match(simplePattern);
+    if (match && match[1].length < 40 && !match[1].includes("http") && !match[1].includes("/")) {
+      if (currentMsg) messages.push(currentMsg);
+      currentMsg = {
+        timestamp: "",
+        sender: match[1].trim().replace(/^\[|\]$/g, ""),
+        text: match[2].trim()
+      };
+      continue;
+    }
+
+    if (currentMsg) {
+      currentMsg.text += "\n" + line;
+    } else {
+      currentMsg = {
+        timestamp: "",
+        sender: "System",
+        text: line
+      };
+    }
+  }
+  
+  if (currentMsg) {
+    messages.push(currentMsg);
+  }
+  
+  return messages;
+}
+
+function renderMessageText(text) {
+  if (!text) return "";
+  const urlRegex = /(https?:\/\/[^\s]+)/g;
+  const parts = text.split(urlRegex);
+  return parts.map((part, index) => {
+    if (part.match(urlRegex)) {
+      return (
+        <a
+          key={index}
+          href={part}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ color: "var(--accent-brass)", textDecoration: "underline", wordBreak: "break-all" }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {part}
+        </a>
+      );
+    }
+    return part;
+  });
+}
+
+const nextId = (prefix) => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+
+const sanitizeAndMigrateTopics = (rawTopics) => {
+  if (!Array.isArray(rawTopics)) return [];
+  const seenIds = new Set();
+  return rawTopics.map((topic) => {
+    if (!topic || typeof topic !== "object") return topic;
+    if (!topic.id || seenIds.has(topic.id)) {
+      const newId = nextId("topic");
+      seenIds.add(newId);
+      return { ...topic, id: newId };
+    }
+    seenIds.add(topic.id);
+    return topic;
+  });
+};
+
+/* ------------------------------------------------------------------ */
+/* IndexedDB Attachment Database Helper                               */
+/* ------------------------------------------------------------------ */
+
+const DB_NAME = "rkv_attachments_db";
+const DB_VERSION = 1;
+const STORE_NAME = "attachments";
+
+const openDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+};
+
+const attachmentDb = {
+  async get(key) {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readonly");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.get(key);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+      });
+    } catch (e) {
+      console.error("IndexedDB get error:", e);
+      return null;
+    }
+  },
+  async set(key, val) {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.put(val, key);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve();
+      });
+    } catch (e) {
+      console.error("IndexedDB set error:", e);
+    }
+  },
+  async delete(key) {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const request = store.delete(key);
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve();
+      });
+    } catch (e) {
+      console.error("IndexedDB delete error:", e);
+    }
+  },
+  async getAllEntries() {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readonly");
+        const store = transaction.objectStore(STORE_NAME);
+        const entries = {};
+        const cursorReq = store.openCursor();
+        cursorReq.onerror = () => reject(cursorReq.error);
+        cursorReq.onsuccess = (e) => {
+          const cursor = e.target.result;
+          if (cursor) {
+            entries[cursor.key] = cursor.value;
+            cursor.continue();
+          } else {
+            resolve(entries);
+          }
+        };
+      });
+    } catch (err) {
+      console.error("IndexedDB getAllEntries error:", err);
+      return {};
+    }
+  },
+  async setMany(entriesObj) {
+    try {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction(STORE_NAME, "readwrite");
+        const store = transaction.objectStore(STORE_NAME);
+        const keys = Object.keys(entriesObj);
+        let done = 0;
+        if (keys.length === 0) { resolve(); return; }
+        for (const key of keys) {
+          const req = store.put(entriesObj[key], key);
+          req.onsuccess = () => { done++; if (done === keys.length) resolve(); };
+          req.onerror = () => reject(req.error);
+        }
+      });
+    } catch (err) {
+      console.error("IndexedDB setMany error:", err);
+    }
+  }
+};
+
+const cleanAttachmentIfDb = async (url) => {
+  if (url && url.startsWith("db://")) {
+    const key = url.replace("db://", "");
+    await attachmentDb.delete(key);
+  }
+};
+
+function OfflineAttachmentPreview({ url, title, type }) {
+  const [dataUrl, setDataUrl] = useState("");
+
+  useEffect(() => {
+    if (!url) return;
+    if (url.startsWith("data:")) {
+      setDataUrl(url);
+    } else if (url.startsWith("db://")) {
+      const key = url.replace("db://", "");
+      attachmentDb.get(key).then((val) => {
+        if (val) setDataUrl(val);
+      });
+    }
+  }, [url]);
+
+  if (!dataUrl) return <div style={{ fontSize: "11px", color: "var(--text-dim)", padding: "4px" }}>Loading offline preview...</div>;
+
+  const isAudio = type === "Audio" || dataUrl.startsWith("data:audio/");
+  const isDiscussion = type === "Discussion" || (type === "Website" && title.toLowerCase().includes("discussion"));
+
+  if (isAudio) {
+    return (
+      <div style={{ borderRadius: "8px", overflow: "hidden", maxWidth: "400px", marginTop: "4px", background: "rgba(0,0,0,0.15)", padding: "8px", border: "1px solid var(--border-color)" }}>
+        <div style={{ padding: "4px", fontSize: "12px", display: "flex", alignItems: "center", gap: "8px", color: "var(--text-primary)" }}>
+          <Mic size={14} style={{ color: "var(--accent-brass)" }} />
+          <span style={{ fontWeight: "500" }}>Voice Note / Audio Attachment</span>
+        </div>
+        <audio src={dataUrl} controls style={{ width: "100%", marginTop: "8px" }} />
+      </div>
+    );
+  }
+
+  if (isDiscussion) {
+    let rawText = "";
+    try {
+      if (dataUrl.startsWith("data:")) {
+        const parts = dataUrl.split(",");
+        const meta = parts[0];
+        const content = parts[1];
+        if (meta.includes("base64")) {
+          rawText = decodeURIComponent(escape(atob(content)));
+        } else {
+          rawText = decodeURIComponent(content);
+        }
+      } else {
+        rawText = dataUrl;
+      }
+    } catch (err) {
+      console.error("Decoding failed", err);
+      rawText = dataUrl;
+    }
+
+    const messages = parseChatLog(rawText);
+
+    const getSenderColor = (sender) => {
+      let hash = 0;
+      for (let i = 0; i < sender.length; i++) {
+        hash = sender.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      const colors = [
+        "#60a5fa", // soft blue
+        "#34d399", // soft green
+        "#fbbf24", // soft amber/brass
+        "#f472b6", // soft pink
+        "#a78bfa", // soft purple
+        "#2dd4bf", // soft teal
+        "#fb7185", // soft rose
+        "#22d3ee", // soft cyan
+      ];
+      return colors[Math.abs(hash) % colors.length];
+    };
+
+    return (
+      <div style={{ 
+        borderRadius: "8px", 
+        overflow: "hidden", 
+        maxWidth: "600px", 
+        marginTop: "8px", 
+        background: "var(--bg-card)", 
+        border: "1px solid var(--border-color)",
+        display: "flex",
+        flexDirection: "column"
+      }}>
+        <div style={{ 
+          padding: "8px 12px", 
+          fontSize: "12px", 
+          display: "flex", 
+          alignItems: "center", 
+          justifyContent: "space-between", 
+          background: "rgba(255,255,255,0.03)", 
+          borderBottom: "1px solid var(--border-color)",
+          color: "var(--text-secondary)"
+        }}>
+          <span style={{ display: "flex", alignItems: "center", gap: "6px", fontWeight: "600" }}>
+            <Users size={14} style={{ color: "var(--accent-verdigris)" }} />
+            Discussion Timeline ({messages.length} messages)
+          </span>
+          <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>Offline Parsed Chat</span>
+        </div>
+        <div style={{ 
+          padding: "12px", 
+          maxHeight: "360px", 
+          overflowY: "auto", 
+          display: "flex", 
+          flexDirection: "column", 
+          gap: "8px",
+          background: "rgba(0,0,0,0.1)"
+        }}>
+          {messages.length === 0 ? (
+            <div style={{ fontSize: "12px", color: "var(--text-dim)", textAlign: "center", padding: "12px" }}>
+              No chat messages could be parsed. Make sure to paste format like: [23:07] Name: Message
+            </div>
+          ) : (
+            messages.map((msg, index) => {
+              const color = getSenderColor(msg.sender);
+              return (
+                <div key={index} style={{ 
+                  display: "flex", 
+                  flexDirection: "column", 
+                  background: "var(--bg-panel)", 
+                  padding: "8px 12px", 
+                  borderRadius: "8px", 
+                  borderLeft: `3px solid ${color}`,
+                  alignSelf: "flex-start",
+                  width: "100%",
+                  boxSizing: "border-box"
+                }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "4px" }}>
+                    <span style={{ fontWeight: "600", color: color, fontSize: "12px" }}>
+                      {msg.sender}
+                    </span>
+                    {msg.timestamp && (
+                      <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>
+                        {msg.timestamp}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ 
+                    fontSize: "13px", 
+                    color: "var(--text-primary)", 
+                    whiteSpace: "pre-wrap", 
+                    lineHeight: "1.4",
+                    wordBreak: "break-word"
+                  }}>
+                    {renderMessageText(msg.text)}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ borderRadius: "8px", overflow: "hidden", maxWidth: "300px", marginTop: "4px", background: "rgba(0,0,0,0.15)", padding: "4px", border: "1px solid var(--border-color)" }}>
+      {dataUrl.startsWith("data:image/") ? (
+        <img src={dataUrl} alt={title} style={{ width: "100%", maxHeight: "160px", objectFit: "contain", borderRadius: "6px" }} />
+      ) : dataUrl.startsWith("data:video/") ? (
+        <video src={dataUrl} controls style={{ width: "100%", maxHeight: "160px", borderRadius: "6px" }} />
+      ) : dataUrl.startsWith("data:application/pdf") ? (
+        <div style={{ padding: "10px", fontSize: "12.5px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span>📄 PDF Document</span>
+          <button 
+            className="btn-landing-secondary" 
+            style={{ padding: "3px 8px", fontSize: "11px", cursor: "pointer", background: "var(--bg-panel)", border: "1px solid var(--border-color)", borderRadius: "4px", color: "white" }}
+            onClick={() => {
+              const link = document.createElement("a");
+              link.href = dataUrl;
+              link.download = title.toLowerCase().endsWith(".pdf") ? title : `${title}.pdf`;
+              link.click();
+            }}
+          >
+            Download
+          </button>
+        </div>
+      ) : (
+        <div style={{ padding: "10px", fontSize: "12.5px", display: "flex", alignItems: "center", gap: "8px" }}>
+          <span>📎 Document Attachment</span>
+          <button 
+            className="btn-landing-secondary" 
+            style={{ padding: "3px 8px", fontSize: "11px", cursor: "pointer", background: "var(--bg-panel)", border: "1px solid var(--border-color)", borderRadius: "4px", color: "white" }}
+            onClick={() => {
+              const link = document.createElement("a");
+              link.href = dataUrl;
+              link.download = title;
+              link.click();
+            }}
+          >
+            Download
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 
 export default function App() {
   // Authentication & Session States
@@ -52,6 +475,73 @@ export default function App() {
   
   const [showAuthForm, setShowAuthForm] = useState(false);
   const [authMode, setAuthMode] = useState("login"); // 'login' | 'register'
+
+  // Voice Recording States
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordDuration, setRecordDuration] = useState(0);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const recordingTimerRef = useRef(null);
+
+  const startAudioRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const options = { mimeType: "audio/webm" };
+      let recorder;
+      try {
+        recorder = new MediaRecorder(stream, options);
+      } catch (e) {
+        recorder = new MediaRecorder(stream);
+      }
+      mediaRecorderRef.current = recorder;
+      
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          audioChunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const base64data = reader.result;
+          setCaptureResUrl(base64data);
+          const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+          if (!captureResTitle) {
+            setCaptureResTitle(`Voice Note - ${timeStr}`);
+          }
+        };
+        reader.readAsDataURL(audioBlob);
+        
+        stream.getTracks().forEach(track => track.stop());
+      };
+
+      recorder.start(200);
+      setIsRecording(true);
+      setRecordDuration(0);
+      recordingTimerRef.current = setInterval(() => {
+        setRecordDuration((prev) => prev + 1);
+      }, 1000);
+      showToast("Recording started...");
+    } catch (err) {
+      console.error("Failed to start recording:", err);
+      setAlertDialog({ message: "Could not access microphone. Please check permissions." });
+    }
+  };
+
+  const stopAudioRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+      mediaRecorderRef.current.stop();
+    }
+    setIsRecording(false);
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+    showToast("Recording saved");
+  };
 
   // Layout Collapsible & Mobile States
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -77,10 +567,12 @@ export default function App() {
     const activeUser = localStorage.getItem("rkv_active_user");
     if (activeUser) {
       const saved = localStorage.getItem(`rkv_vault_${activeUser}`);
-      return saved ? JSON.parse(saved) : [];
+      const userTopics = saved ? JSON.parse(saved) : [];
+      return sanitizeAndMigrateTopics(userTopics);
     }
     return [];
   });
+
 
   // Active view: can be a topic ID, "unsorted", or "recently-viewed"
   const [activeView, setActiveView] = useState("all-topics"); 
@@ -113,11 +605,13 @@ export default function App() {
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
+  const [storageInfo, setStorageInfo] = useState(null); // { usage, quota, percent, lsUsed }
   const [captureOpen, setCaptureOpen] = useState(false);
   const [captureMode, setCaptureMode] = useState("discovery"); // 'discovery' | 'resource'
   const [captureResType, setCaptureResType] = useState("Website");
   const [captureResTitle, setCaptureResTitle] = useState("");
   const [captureResUrl, setCaptureResUrl] = useState("");
+  const [captureResTranscript, setCaptureResTranscript] = useState("");
   const [toast, setToast] = useState(null);
 
   useEffect(() => {
@@ -125,8 +619,14 @@ export default function App() {
       setCaptureResType("Website");
       setCaptureResTitle("");
       setCaptureResUrl("");
+      setCaptureResTranscript("");
+    } else {
+      if (isRecording) {
+        stopAudioRecording();
+      }
+      setRecordDuration(0);
     }
-  }, [captureOpen]);
+  }, [captureOpen, isRecording]);
 
   const handleCaptureFileChange = (e) => {
     const file = e.target.files[0];
@@ -137,10 +637,15 @@ export default function App() {
       if (!captureResTitle) {
         setCaptureResTitle(file.name);
       }
+      const ext = file.name.split('.').pop().toLowerCase();
       if (file.type.startsWith("image/")) {
         setCaptureResType("Image");
       } else if (file.type.startsWith("video/")) {
         setCaptureResType("Video");
+      } else if (file.type === "application/pdf" || ext === "pdf") {
+        setCaptureResType("PDF");
+      } else if (ext === "ppt" || ext === "pptx" || ext === "doc" || ext === "docx" || ext === "xls" || ext === "xlsx") {
+        setCaptureResType("Book");
       }
     };
     reader.readAsDataURL(file);
@@ -187,6 +692,8 @@ export default function App() {
   // Custom modals & alerts states
   const [editingResource, setEditingResource] = useState(null); // null | { id, title, type, sourceId, sourceUrl }
   const [editingSource, setEditingSource] = useState(null); // null | { id, title, url }
+  const [editingNote, setEditingNote] = useState(null); // null | { id, text }
+  const [editingDiscovery, setEditingDiscovery] = useState(null); // null | { id, title, statement, verification, visibility }
   const [confirmDialog, setConfirmDialog] = useState(null); // null | { message, onConfirm }
   const [alertDialog, setAlertDialog] = useState(null); // null | { message }
 
@@ -221,7 +728,9 @@ export default function App() {
     if (currentUser) {
       const savedVault = localStorage.getItem(`rkv_vault_${currentUser}`);
       const userTopics = savedVault ? JSON.parse(savedVault) : [];
-      setTopics(userTopics);
+      const migratedTopics = sanitizeAndMigrateTopics(userTopics);
+      setTopics(migratedTopics);
+
 
       const savedUnsorted = localStorage.getItem(`rkv_unsorted_${currentUser}`);
       setUnsortedResources(savedUnsorted ? JSON.parse(savedUnsorted) : []);
@@ -278,7 +787,7 @@ export default function App() {
     setRecentlyViewed((prev) => {
       const filtered = prev.filter((item) => item.id !== id);
       const updated = [{ id, type, name, topicName, timestamp: new Date().toLocaleTimeString() }, ...filtered];
-      return updated.slice(0, 10); // Keep last 10 entries
+      return updated.slice(0, 5); // Keep last 5 entries
     });
   };
 
@@ -300,12 +809,24 @@ export default function App() {
   };
 
   /* --- File Import/Export System --- */
-  const exportData = () => {
+  const exportData = async () => {
+    showToast("Preparing export (reading attachments)…");
+    let attachments = {};
+    try {
+      attachments = await attachmentDb.getAllEntries();
+    } catch (err) {
+      console.warn("Could not read IndexedDB attachments for export:", err);
+    }
+
     const data = {
       topics,
       unsortedResources,
-      recentlyViewed
+      recentlyViewed,
+      _attachments: attachments,        // keyed by "attachment_r_xxx"
+      _exportedAt: new Date().toISOString(),
+      _version: 2
     };
+
     const dataStr = JSON.stringify(data, null, 2);
     const blob = new Blob([dataStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -316,29 +837,49 @@ export default function App() {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
-    showToast("Full Vault data exported successfully");
+
+    const attachCount = Object.keys(attachments).length;
+    showToast(`Vault exported — ${attachCount} attachment${attachCount !== 1 ? "s" : ""} included`);
   };
 
   const importData = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const parsed = JSON.parse(event.target.result);
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          if (parsed.topics) setTopics(parsed.topics);
+
+          // Restore IndexedDB attachments first (so previews work right away)
+          if (parsed._attachments && typeof parsed._attachments === "object") {
+            const entries = parsed._attachments;
+            const count = Object.keys(entries).length;
+            if (count > 0) {
+              try {
+                await attachmentDb.setMany(entries);
+                showToast(`Restoring ${count} offline attachment${count !== 1 ? "s" : ""}…`);
+              } catch (err) {
+                console.error("Failed to restore IndexedDB attachments:", err);
+              }
+            }
+          }
+
+          if (parsed.topics) setTopics(sanitizeAndMigrateTopics(parsed.topics));
           if (parsed.unsortedResources) setUnsortedResources(parsed.unsortedResources);
           if (parsed.recentlyViewed) setRecentlyViewed(parsed.recentlyViewed);
           if (parsed.topics && parsed.topics.length > 0) {
-            setActiveTopicId(parsed.topics[0].id);
+            const cleanTopics = sanitizeAndMigrateTopics(parsed.topics);
+            setActiveTopicId(cleanTopics[0].id);
             setActiveView("topic");
           }
           showToast("Vault backup imported successfully!");
+
         } else if (Array.isArray(parsed)) {
-          setTopics(parsed);
-          if (parsed.length > 0) {
-            setActiveTopicId(parsed[0].id);
+          const cleanTopics = sanitizeAndMigrateTopics(parsed);
+          setTopics(cleanTopics);
+          if (cleanTopics.length > 0) {
+            setActiveTopicId(cleanTopics[0].id);
             setActiveView("topic");
           }
           showToast("Topics imported from legacy backup");
@@ -351,6 +892,7 @@ export default function App() {
     };
     reader.readAsText(file);
   };
+
 
   /* --- Nextcloud WebDAV Sync System --- */
   const getNextcloudHeaders = () => {
@@ -416,11 +958,12 @@ export default function App() {
       if (response.ok) {
         const parsed = await response.json();
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          if (parsed.topics) setTopics(parsed.topics);
+          const cleanTopics = sanitizeAndMigrateTopics(parsed.topics || []);
+          setTopics(cleanTopics);
           if (parsed.unsortedResources) setUnsortedResources(parsed.unsortedResources);
           if (parsed.recentlyViewed) setRecentlyViewed(parsed.recentlyViewed);
-          if (parsed.topics && parsed.topics.length > 0) {
-            setActiveTopicId(parsed.topics[0].id);
+          if (cleanTopics.length > 0) {
+            setActiveTopicId(cleanTopics[0].id);
             setActiveView("topic");
           }
           const timeStr = new Date().toLocaleTimeString();
@@ -529,6 +1072,29 @@ export default function App() {
     showToast("Password PIN successfully changed.");
   };
 
+  const refreshStorageInfo = async () => {
+    try {
+      let usage = 0, quota = 0, percent = 0;
+      if (navigator.storage && navigator.storage.estimate) {
+        const est = await navigator.storage.estimate();
+        usage = est.usage || 0;
+        quota = est.quota || 0;
+        percent = quota > 0 ? (usage / quota) * 100 : 0;
+      }
+
+      // Estimate localStorage size
+      let lsBytes = 0;
+      for (const key of Object.keys(localStorage)) {
+        lsBytes += (localStorage.getItem(key) || "").length * 2; // 2 bytes per char (UTF-16)
+      }
+
+      setStorageInfo({ usage, quota, percent, lsUsed: lsBytes });
+    } catch (err) {
+      console.error("Storage estimate failed:", err);
+      setStorageInfo({ usage: 0, quota: 0, percent: 0, lsUsed: 0 });
+    }
+  };
+
   const handleClearAllData = () => {
     setConfirmDialog({
       message: "WARNING: This will permanently delete all topics, resources, notes, and discoveries for this profile. Continue?",
@@ -614,13 +1180,24 @@ export default function App() {
     if (!title) return;
 
     const today = new Date().toISOString().split("T")[0];
+    const resId = nextId("r");
+    let finalUrl = newResourceUrl;
+    if (newResourceUrl && newResourceUrl.startsWith("data:")) {
+      const attachId = `attachment_${resId}`;
+      attachmentDb.set(attachId, newResourceUrl).catch((err) => {
+        console.error("Failed to save attachment in IndexedDB", err);
+      });
+      finalUrl = `db://${attachId}`;
+    }
+
     const newRes = {
-      id: nextId("r"),
+      id: resId,
       title,
       type: newResourceType,
       status: "Unread",
       date: today,
-      sourceId: newResourceUrl ? nextId("s") : null,
+      sourceId: finalUrl ? nextId("s") : null,
+      url: finalUrl,
     };
 
     if (activeView === "unsorted") {
@@ -631,13 +1208,13 @@ export default function App() {
         prev.map((t) => {
           if (t.id !== activeTopicId) return t;
           const resources = [newRes, ...t.resources];
-          const sources = newResourceUrl
+          const sources = finalUrl
             ? [
                 {
                   id: newRes.sourceId,
                   type: newResourceType === "YouTube Video" ? "Video" : "Website",
                   title: `${title} Source`,
-                  url: newResourceUrl,
+                  url: finalUrl,
                   date: today.split("-")[0],
                 },
                 ...t.sources,
@@ -688,7 +1265,7 @@ export default function App() {
             ...t,
             resources,
             timeline: [
-              { date: today, text: `Changed status of "${resObj.title}" to ${next}.` },
+              { date: today, text: `Changed status of "${resObj.title}" to ${nextStatus}.` },
               ...t.timeline,
             ],
           };
@@ -702,9 +1279,14 @@ export default function App() {
     setConfirmDialog({
       message: "Are you sure you want to delete this resource?",
       onConfirm: () => {
+        let targetUrl = "";
         if (activeView === "unsorted") {
+          const res = unsortedResources.find((r) => r.id === resourceId);
+          if (res) targetUrl = res.url;
           setUnsortedResources((prev) => prev.filter((r) => r.id !== resourceId));
         } else {
+          const res = activeTopic?.resources?.find((r) => r.id === resourceId);
+          if (res) targetUrl = res.url;
           setTopics((prev) =>
             prev.map((t) => {
               if (t.id !== activeTopicId) return t;
@@ -712,6 +1294,7 @@ export default function App() {
             })
           );
         }
+        if (targetUrl) cleanAttachmentIfDb(targetUrl);
         showToast("Resource deleted");
       }
     });
@@ -759,11 +1342,20 @@ export default function App() {
 
     if (!resourceObj) return;
 
+    let finalSourceUrl = newSourceUrl;
+    if (newSourceUrl && newSourceUrl.startsWith("data:")) {
+      const attachId = `attachment_${id}`;
+      attachmentDb.set(attachId, newSourceUrl).catch((err) => {
+        console.error("Failed to save attachment in IndexedDB", err);
+      });
+      finalSourceUrl = `db://${attachId}`;
+    }
+
     const updatedResource = {
       ...resourceObj,
       title: titleTrim,
       type: newType,
-      url: newSourceUrl || resourceObj.url || "",
+      url: finalSourceUrl || resourceObj.url || "",
     };
 
     const currentTopicId = isCurrentlyUnsorted ? "unsorted" : currentTopicOfResource.id;
@@ -791,11 +1383,11 @@ export default function App() {
             let updatedSources = t.sources;
             let newSourceId = updatedResource.sourceId || nextId("s");
 
-            if (newSourceUrl && newSourceUrl.trim() !== "") {
+            if (finalSourceUrl && finalSourceUrl.trim() !== "") {
               const srcExists = t.sources.some((s) => s.id === newSourceId);
               if (srcExists) {
                 updatedSources = t.sources.map((s) =>
-                  s.id === newSourceId ? { ...s, url: newSourceUrl, title: `${titleTrim} Source` } : s
+                  s.id === newSourceId ? { ...s, url: finalSourceUrl, title: `${titleTrim} Source` } : s
                 );
               } else {
                 updatedSources = [
@@ -803,7 +1395,7 @@ export default function App() {
                     id: newSourceId,
                     type: newType === "YouTube Video" || newType === "Video" ? "Video" : "Website",
                     title: `${titleTrim} Source`,
-                    url: newSourceUrl,
+                    url: finalSourceUrl,
                     date: new Date().getFullYear().toString(),
                   },
                   ...t.sources,
@@ -833,19 +1425,19 @@ export default function App() {
             if (t.id !== currentTopicId) return t;
             let updatedSources = t.sources;
             let newSourceId = sourceId;
-            if (newSourceUrl !== undefined) {
+            if (finalSourceUrl !== undefined) {
               if (sourceId) {
                 updatedSources = t.sources.map((s) =>
-                  s.id === sourceId ? { ...s, url: newSourceUrl, title: `${titleTrim} Source` } : s
+                  s.id === sourceId ? { ...s, url: finalSourceUrl, title: `${titleTrim} Source` } : s
                 );
-              } else if (newSourceUrl.trim() !== "") {
+              } else if (finalSourceUrl.trim() !== "") {
                 const newSrcId = nextId("s");
                 updatedSources = [
                   {
                     id: newSrcId,
                     type: newType === "YouTube Video" || newType === "Video" ? "Video" : "Website",
                     title: `${titleTrim} Source`,
-                    url: newSourceUrl,
+                    url: finalSourceUrl,
                     date: new Date().getFullYear().toString(),
                   },
                   ...t.sources,
@@ -892,18 +1484,24 @@ export default function App() {
       id: source.id,
       title: source.title,
       url: source.url || "",
+      type: source.type || "Website",
+      author: source.author || "",
+      publisher: source.publisher || "",
+      pages: source.pages || "",
+      channel: source.channel || "",
+      date: source.date || "",
     });
   };
 
-  const saveSourceEdit = (id, newTitle, newUrl) => {
-    const titleTrim = newTitle.trim();
+  const saveSourceEdit = (id, fields) => {
+    const titleTrim = fields.title.trim();
     if (!titleTrim) return;
     setTopics((prev) =>
       prev.map((t) => {
         if (t.id !== activeTopicId) return t;
         return {
           ...t,
-          sources: t.sources.map((s) => s.id === id ? { ...s, title: titleTrim, url: newUrl } : s)
+          sources: t.sources.map((s) => s.id === id ? { ...s, ...fields, title: titleTrim } : s)
         };
       })
     );
@@ -1028,14 +1626,24 @@ export default function App() {
         }
       }
 
+      const resId = nextId("r");
+      let finalContent = content;
+      if (content && content.startsWith("data:")) {
+        const attachId = `attachment_${resId}`;
+        attachmentDb.set(attachId, content).catch((err) => {
+          console.error("Failed to save attachment in IndexedDB", err);
+        });
+        finalContent = `db://${attachId}`;
+      }
+
       const resObj = {
-        id: nextId("r"),
+        id: resId,
         title,
         type: resType,
         status: "Unread",
         date: today,
-        sourceId: content ? nextId("s") : null,
-        url: content,
+        sourceId: finalContent ? nextId("s") : null,
+        url: finalContent,
       };
 
       if (topicTargetId === "unsorted") {
@@ -1045,12 +1653,12 @@ export default function App() {
         setTopics((prev) =>
           prev.map((t) => {
             if (t.id !== topicTargetId) return t;
-            const src = content
+            const src = finalContent
               ? {
                   id: resObj.sourceId,
                   type: resType === "YouTube Video" ? "Video" : (resType === "Video" ? "Video" : "Website"),
                   title,
-                  url: content,
+                  url: finalContent,
                   date: today.split("-")[0],
                 }
               : null;
@@ -1065,6 +1673,86 @@ export default function App() {
         showToast(`Quick captured resource to topic`);
       }
     }
+  };
+
+  const deleteNote = (noteId) => {
+    setConfirmDialog({
+      message: "Are you sure you want to delete this note?",
+      onConfirm: () => {
+        setTopics((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeTopicId) return t;
+            return {
+              ...t,
+              notes: t.notes.filter((n) => n.id !== noteId),
+            };
+          })
+        );
+        showToast("Note deleted");
+      }
+    });
+  };
+
+  const saveNoteEdit = () => {
+    if (!editingNote) return;
+    const textTrim = editingNote.text.trim();
+    if (!textTrim) return;
+    setTopics((prev) =>
+      prev.map((t) => {
+        if (t.id !== activeTopicId) return t;
+        return {
+          ...t,
+          notes: t.notes.map((n) => n.id === editingNote.id ? { ...n, text: textTrim } : n)
+        };
+      })
+    );
+    setEditingNote(null);
+    showToast("Note updated");
+  };
+
+  const deleteDiscovery = (discId) => {
+    setConfirmDialog({
+      message: "Are you sure you want to delete this discovery?",
+      onConfirm: () => {
+        setTopics((prev) =>
+          prev.map((t) => {
+            if (t.id !== activeTopicId) return t;
+            return {
+              ...t,
+              discoveries: t.discoveries.filter((d) => d.id !== discId),
+            };
+          })
+        );
+        showToast("Discovery deleted");
+      }
+    });
+  };
+
+  const saveDiscoveryEdit = () => {
+    if (!editingDiscovery) return;
+    const titleTrim = editingDiscovery.title.trim();
+    if (!titleTrim) return;
+    setTopics((prev) =>
+      prev.map((t) => {
+        if (t.id !== activeTopicId) return t;
+        return {
+          ...t,
+          discoveries: t.discoveries.map((d) =>
+            d.id === editingDiscovery.id
+              ? {
+                  ...d,
+                  title: titleTrim,
+                  statement: editingDiscovery.statement.trim(),
+                  verification: editingDiscovery.verification,
+                  visibility: editingDiscovery.visibility
+                }
+              : d
+          )
+        };
+      })
+    );
+    setEditingDiscovery(null);
+    showToast("Discovery updated");
   };
 
   /* --- Global Search Parser --- */
@@ -1301,41 +1989,42 @@ export default function App() {
           </button>
         </div>
 
-        <div style={{ flex: 1, overflowY: "auto" }}>
-          {/* Library Navigation */}
-          <div className="sidebar-nav-section">
-            <div className="sidebar-section-title">Library</div>
-            <button
-              className={`sidebar-item ${activeView === "all-topics" ? "active" : ""}`}
-              onClick={() => { setActiveView("all-topics"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
-            >
-              <BookMarked size={15} />
-              <span>All Topics</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeView === "unsorted" ? "active" : ""}`}
-              onClick={() => { setActiveView("unsorted"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
-            >
-              <HelpCircle size={15} />
-              <span>Unsorted</span>
-            </button>
-            <button
-              className={`sidebar-item ${activeView === "recently-viewed" ? "active" : ""}`}
-              onClick={() => { setActiveView("recently-viewed"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
-            >
-              <Eye size={15} />
-              <span>Recently Viewed</span>
+        {/* Library Navigation (static) */}
+        <div className="sidebar-nav-section" style={{ flexShrink: 0 }}>
+          <div className="sidebar-section-title">Library</div>
+          <button
+            className={`sidebar-item ${activeView === "all-topics" ? "active" : ""}`}
+            onClick={() => { setActiveView("all-topics"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+          >
+            <BookMarked size={15} />
+            <span>All Topics</span>
+          </button>
+          <button
+            className={`sidebar-item ${activeView === "unsorted" ? "active" : ""}`}
+            onClick={() => { setActiveView("unsorted"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+          >
+            <HelpCircle size={15} />
+            <span>Unsorted</span>
+          </button>
+          <button
+            className={`sidebar-item ${activeView === "recently-viewed" ? "active" : ""}`}
+            onClick={() => { setActiveView("recently-viewed"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+          >
+            <Eye size={15} />
+            <span>Recently Viewed</span>
+          </button>
+        </div>
+
+        {/* Topics List (scrollable) */}
+        <div className="sidebar-nav-section" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
+          <div className="sidebar-section-title" style={{ flexShrink: 0 }}>
+            <span>Research Topics</span>
+            <button onClick={() => setAddingTopic(true)} title="Add new topic">
+              <Plus size={14} />
             </button>
           </div>
 
-          {/* Topics List */}
-          <div className="sidebar-nav-section">
-            <div className="sidebar-section-title">
-              <span>Research Topics</span>
-              <button onClick={() => setAddingTopic(true)} title="Add new topic">
-                <Plus size={14} />
-              </button>
-            </div>
+          <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
 
             {addingTopic && (
               <div className="topic-input-wrapper-highlight" style={{ padding: "8px 20px" }}>
@@ -1557,12 +2246,12 @@ export default function App() {
               title={aboutCollapsed ? "Show About Panel" : "Hide About Panel"}
               style={{ color: aboutCollapsed ? "var(--text-dim)" : "var(--accent-brass)" }}
             >
-              <Shield size={16} />
+              <Info size={16} />
             </button>
             <button className="topbar-icon-btn" onClick={() => setHelpModalOpen(true)} title="Help & Documentation">
               <HelpCircle size={16} />
             </button>
-            <button className="topbar-icon-btn" onClick={() => setSettingsModalOpen(true)} title="Settings">
+            <button className="topbar-icon-btn" onClick={() => { setSettingsModalOpen(true); refreshStorageInfo(); }} title="Settings">
               <Settings size={16} />
             </button>
 
@@ -1577,7 +2266,7 @@ export default function App() {
                     <div className="profile-menu-name">Profile: {currentUser}</div>
                     <div className="profile-menu-sub">Active Local Space</div>
                   </div>
-                  <button className="profile-menu-item" onClick={() => { setProfileDropdownOpen(false); setSettingsModalOpen(true); }}>
+                  <button className="profile-menu-item" onClick={() => { setProfileDropdownOpen(false); setSettingsModalOpen(true); refreshStorageInfo(); }}>
                     <Settings size={14} />
                     <span>Vault Settings</span>
                   </button>
@@ -1689,7 +2378,23 @@ export default function App() {
                             <Icon size={18} className="resource-detail-icon" style={{ marginTop: "3px" }} />
                             <div className="resource-detail-info">
                               <h4 className="resource-detail-title">{r.title}</h4>
-                              <span className="resource-detail-meta">{r.type} • Unsorted Inbox</span>
+                              <span className="resource-detail-meta">
+                                {r.type} • Unsorted Inbox
+                                {r.url && !r.url.startsWith("data:") && !r.url.startsWith("db://") && (
+                                  <>
+                                    {" • "}
+                                    <a 
+                                      href={r.url.startsWith("http") ? r.url : `https://${r.url}`} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      Visit link <Link2 size={10} />
+                                    </a>
+                                  </>
+                                )}
+                              </span>
                             </div>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -1712,14 +2417,8 @@ export default function App() {
                             </button>
                           </div>
                         </div>
-                        {r.url && r.url.startsWith("data:") && (
-                          <div style={{ borderRadius: "8px", overflow: "hidden", maxWidth: "300px", marginTop: "4px", background: "rgba(0,0,0,0.15)", padding: "4px", border: "1px solid var(--border-color)" }}>
-                            {r.url.startsWith("data:image/") ? (
-                              <img src={r.url} alt={r.title} style={{ width: "100%", maxHeight: "160px", objectFit: "contain", borderRadius: "6px" }} />
-                            ) : r.url.startsWith("data:video/") ? (
-                              <video src={r.url} controls style={{ width: "100%", maxHeight: "160px", borderRadius: "6px" }} />
-                            ) : null}
-                          </div>
+                        {r.url && (r.url.startsWith("data:") || r.url.startsWith("db://")) && (
+                          <OfflineAttachmentPreview url={r.url} title={r.title} type={r.type} />
                         )}
                       </div>
                     );
@@ -2040,6 +2739,26 @@ export default function App() {
                                       <h4 className="resource-detail-title">{r.title}</h4>
                                       <span className="resource-detail-meta">
                                         {r.type} • added {fmtDate(r.date)}
+                                        {(() => {
+                                          const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
+                                          if (resUrl && !resUrl.startsWith("data:") && !resUrl.startsWith("db://")) {
+                                            return (
+                                              <>
+                                                {" • "}
+                                                <a 
+                                                  href={resUrl.startsWith("http") ? resUrl : `https://${resUrl}`} 
+                                                  target="_blank" 
+                                                  rel="noopener noreferrer" 
+                                                  style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
+                                                  onClick={(e) => e.stopPropagation()}
+                                                >
+                                                  Visit link <Link2 size={10} />
+                                                </a>
+                                              </>
+                                            );
+                                          }
+                                          return null;
+                                        })()}
                                       </span>
                                     </div>
                                   </div>
@@ -2069,16 +2788,8 @@ export default function App() {
                                 </div>
                                 {(() => {
                                   const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
-                                  if (resUrl && resUrl.startsWith("data:")) {
-                                    return (
-                                      <div style={{ borderRadius: "8px", overflow: "hidden", maxWidth: "300px", marginTop: "4px", background: "rgba(0,0,0,0.15)", padding: "4px", border: "1px solid var(--border-color)" }}>
-                                        {resUrl.startsWith("data:image/") ? (
-                                          <img src={resUrl} alt={r.title} style={{ width: "100%", maxHeight: "160px", objectFit: "contain", borderRadius: "6px" }} />
-                                        ) : resUrl.startsWith("data:video/") ? (
-                                          <video src={resUrl} controls style={{ width: "100%", maxHeight: "160px", borderRadius: "6px" }} />
-                                        ) : null}
-                                      </div>
-                                    );
+                                  if (resUrl && (resUrl.startsWith("data:") || resUrl.startsWith("db://"))) {
+                                    return <OfflineAttachmentPreview url={resUrl} title={r.title} type={r.type} />;
                                   }
                                   return null;
                                 })()}
@@ -2114,10 +2825,41 @@ export default function App() {
                     <div className="notes-grid">
                       {activeTopic.notes.map((n) => (
                         <div key={n.id} className="note-card">
-                          <div className="note-card-header">
-                            <span className="note-card-date">{fmtDate(n.date)}</span>
-                          </div>
-                          <p className="note-card-text">{n.text}</p>
+                          <div className="note-card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                             <span className="note-card-date">{fmtDate(n.date)}</span>
+                             <div style={{ display: "flex", gap: "8px" }}>
+                               <button 
+                                 style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+                                 onClick={() => setEditingNote({ id: n.id, text: n.text })}
+                                 title="Edit Note"
+                               >
+                                 <Edit3 size={12} />
+                               </button>
+                               <button 
+                                 style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
+                                 onClick={() => deleteNote(n.id)}
+                                 title="Delete Note"
+                               >
+                                 <Trash2 size={12} />
+                               </button>
+                             </div>
+                           </div>
+                           {editingNote && editingNote.id === n.id ? (
+                             <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }}>
+                               <textarea
+                                 className="form-textarea"
+                                 style={{ fontSize: "13.5px" }}
+                                 value={editingNote.text}
+                                 onChange={(e) => setEditingNote({ ...editingNote, text: e.target.value })}
+                               />
+                               <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
+                                 <button className="btn-solid" style={{ background: "var(--accent-brass)", color: "black", padding: "2px 8px", fontSize: "11px" }} onClick={saveNoteEdit}>Save</button>
+                                 <button className="btn-ghost" style={{ padding: "2px 8px", fontSize: "11px" }} onClick={() => setEditingNote(null)}>Cancel</button>
+                               </div>
+                             </div>
+                           ) : (
+                             <p className="note-card-text">{n.text}</p>
+                           )}
                           
                           {n.convertedTo ? (
                             <span className="note-converted-badge">
@@ -2193,8 +2935,30 @@ export default function App() {
                           <span>{d.verification}</span>
                         </div>
 
-                        <div className="discovery-card-header">
+                        <div className="discovery-card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                           <h4 className="discovery-card-title">{d.title}</h4>
+                          <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
+                            <button
+                              style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+                              onClick={() => setEditingDiscovery({
+                                id: d.id,
+                                title: d.title,
+                                statement: d.statement,
+                                verification: d.verification,
+                                visibility: d.visibility
+                              })}
+                              title="Edit Discovery"
+                            >
+                              <Edit3 size={13} style={{ display: "block" }} />
+                            </button>
+                            <button
+                              style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
+                              onClick={() => deleteDiscovery(d.id)}
+                              title="Delete Discovery"
+                            >
+                              <Trash2 size={13} style={{ display: "block" }} />
+                            </button>
+                          </div>
                         </div>
 
                         <p className="discovery-statement">{d.statement}</p>
@@ -2271,31 +3035,36 @@ export default function App() {
                       </div>
                     ) : (
                       activeTopic.sources.map((s) => (
-                         <div key={s.id} className="source-card-item" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "20px" }}>
-                           <div>
-                             <h4 className="source-card-title">{s.title}</h4>
-                             <div className="source-card-meta">
-                               {s.type === "Book" && `Author: ${s.author} • Publisher: ${s.publisher} • Pages: ${s.pages || "N/A"}`}
-                               {s.type === "Video" && `Video Channel: ${s.channel || "N/A"} • URL: ${s.url}`}
-                               {s.type === "Website" && `Author: ${s.author || "N/A"} • Published: ${s.date || "N/A"} • URL: ${s.url}`}
+                         <div key={s.id} className="source-card-item" style={{ display: "flex", flexDirection: "column", gap: "10px", alignItems: "stretch" }}>
+                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "20px" }}>
+                             <div>
+                               <h4 className="source-card-title">{s.title}</h4>
+                               <div className="source-card-meta">
+                                 {s.type === "Book" && `Author: ${s.author} • Publisher: ${s.publisher} • Pages: ${s.pages || "N/A"}`}
+                                 {s.type === "Video" && `Video Channel: ${s.channel || "N/A"}${s.url && !s.url.startsWith("data:") && !s.url.startsWith("db://") ? ` • URL: ${s.url}` : ""}`}
+                                 {s.type === "Website" && `Author: ${s.author || "N/A"} • Published: ${s.date || "N/A"}${s.url && !s.url.startsWith("data:") && !s.url.startsWith("db://") ? ` • URL: ${s.url}` : ""}`}
+                               </div>
+                             </div>
+                             <div style={{ display: "flex", gap: "12px", flexShrink: 0 }}>
+                               <button 
+                                 style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+                                 onClick={() => editSource(s)}
+                                 title="Edit source bibliography"
+                               >
+                                 <Edit3 size={14} />
+                               </button>
+                               <button 
+                                 style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
+                                 onClick={() => deleteSource(s.id)}
+                                 title="Delete source"
+                               >
+                                 <Trash2 size={14} />
+                               </button>
                              </div>
                            </div>
-                           <div style={{ display: "flex", gap: "12px", flexShrink: 0 }}>
-                             <button 
-                               style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
-                               onClick={() => editSource(s)}
-                               title="Edit source bibliography"
-                             >
-                               <Edit3 size={14} />
-                             </button>
-                             <button 
-                               style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
-                               onClick={() => deleteSource(s.id)}
-                               title="Delete source"
-                             >
-                               <Trash2 size={14} />
-                             </button>
-                           </div>
+                           {s.url && (s.url.startsWith("data:") || s.url.startsWith("db://")) && (
+                             <OfflineAttachmentPreview url={s.url} title={s.title} type={s.type} />
+                           )}
                          </div>
                       ))
                     )}
@@ -2432,7 +3201,11 @@ export default function App() {
                     <select
                       className="form-input"
                       value={captureResType}
-                      onChange={(e) => setCaptureResType(e.target.value)}
+                      onChange={(e) => {
+                        setCaptureResType(e.target.value);
+                        setCaptureResUrl("");
+                        setCaptureResTranscript("");
+                      }}
                     >
                       {Object.keys(TYPE_ICON).map((k) => (
                         <option key={k} value={k}>{k}</option>
@@ -2441,50 +3214,135 @@ export default function App() {
                   </div>
 
                   <div className="form-group">
-                    <label className="form-label">Resource Title</label>
+                    <label className="form-label">
+                      {captureResType === "Discussion" ? "Discussion / Source Name" : "Resource Title"}
+                    </label>
                     <input
                       type="text"
                       className="form-input"
-                      placeholder="E.g., Webots Robotics Simulator"
+                      placeholder={captureResType === "Discussion" ? "E.g., Team WhatsApp Group, ChatGPT Session..." : "E.g., Webots Robotics Simulator"}
                       value={captureResTitle}
                       onChange={(e) => setCaptureResTitle(e.target.value)}
                     />
                   </div>
 
-                  <div className="form-group">
-                    <label className="form-label">Source Link URL / File Base64</label>
-                    <input
-                      type="text"
-                      className="form-input"
-                      placeholder="E.g., https://github.com/cyberbotics/webots"
-                      value={captureResUrl}
-                      onChange={(e) => setCaptureResUrl(e.target.value)}
-                    />
-                  </div>
-
-                  <div className="form-group" style={{ borderTop: "1px dashed var(--border-color)", paddingTop: "12px", marginTop: "12px" }}>
-                    <label className="form-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <span>Upload Picture / Video File</span>
-                      <span style={{ color: "var(--accent-brass)", fontSize: "10px" }}>Offline storage</span>
-                    </label>
-                    <input
-                      type="file"
-                      className="form-input"
-                      accept="image/*,video/*"
-                      onChange={handleCaptureFileChange}
-                      style={{ padding: "4px" }}
-                    />
-                  </div>
-
-                  {captureResUrl && captureResUrl.startsWith("data:") && (
-                    <div style={{ marginTop: "12px", borderRadius: "8px", overflow: "hidden", border: "1px solid var(--border-color)", padding: "8px", background: "rgba(0,0,0,0.2)" }}>
-                      <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "4px" }}>File Preview:</div>
-                      {captureResUrl.startsWith("data:image/") ? (
-                        <img src={captureResUrl} alt="Preview" style={{ width: "100%", maxHeight: "150px", objectFit: "contain", borderRadius: "4px" }} />
-                      ) : captureResUrl.startsWith("data:video/") ? (
-                        <video src={captureResUrl} controls style={{ width: "100%", maxHeight: "150px", borderRadius: "4px" }} />
-                      ) : null}
+                  {/* DISCUSSION: Chat paste area */}
+                  {captureResType === "Discussion" ? (
+                    <div className="form-group" style={{ borderTop: "1px dashed var(--border-color)", paddingTop: "12px", marginTop: "4px" }}>
+                      <label className="form-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <Users size={13} style={{ color: "var(--accent-verdigris)" }} />
+                          Paste Chat Log
+                        </span>
+                        <span style={{ color: "var(--accent-brass)", fontSize: "10px" }}>Parsed offline</span>
+                      </label>
+                      <textarea
+                        className="form-textarea"
+                        rows={10}
+                        style={{ fontFamily: "var(--font-mono)", fontSize: "11.5px", lineHeight: "1.6", resize: "vertical" }}
+                        placeholder={`Paste your WhatsApp, AI, or any chat log here.\n\nSupported formats:\n[23:07, 6/12/2026] Alby: message here\n23:07 - Alby: message here\nAlby: message here`}
+                        value={captureResTranscript}
+                        onChange={(e) => setCaptureResTranscript(e.target.value)}
+                      />
+                      {captureResTranscript && (
+                        <div style={{ marginTop: "8px", padding: "8px 10px", background: "rgba(94,133,119,0.1)", borderRadius: "6px", border: "1px solid var(--accent-verdigris)", fontSize: "11px", color: "var(--accent-verdigris)" }}>
+                          ✓ {parseChatLog(captureResTranscript).length} messages detected — will be rendered as a chat timeline
+                        </div>
+                      )}
                     </div>
+                  ) : captureResType === "Audio" ? (
+                    /* AUDIO: Recording controls */
+                    <div className="form-group" style={{ borderTop: "1px dashed var(--border-color)", paddingTop: "12px", marginTop: "4px" }}>
+                      <label className="form-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <Mic size={13} style={{ color: "var(--accent-brass)" }} />
+                          Voice Recording
+                        </span>
+                        <span style={{ color: "var(--accent-brass)", fontSize: "10px" }}>Stored offline</span>
+                      </label>
+
+                      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "8px" }}>
+                        {!isRecording ? (
+                          <button
+                            className="btn-solid"
+                            style={{ background: "var(--accent-garnet)", color: "white", display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", border: "none", cursor: "pointer", fontSize: "13px" }}
+                            onClick={startAudioRecording}
+                          >
+                            <Mic size={15} />
+                            Start Recording
+                          </button>
+                        ) : (
+                          <button
+                            className="btn-solid"
+                            style={{ background: "rgba(166,83,61,0.3)", color: "var(--accent-garnet)", border: "2px solid var(--accent-garnet)", display: "flex", alignItems: "center", gap: "6px", padding: "8px 16px", borderRadius: "8px", cursor: "pointer", fontSize: "13px", animation: "pulse 1s infinite" }}
+                            onClick={stopAudioRecording}
+                          >
+                            <span style={{ width: "10px", height: "10px", borderRadius: "2px", background: "var(--accent-garnet)", display: "inline-block" }} />
+                            Stop ({Math.floor(recordDuration / 60).toString().padStart(2, "0")}:{(recordDuration % 60).toString().padStart(2, "0")})
+                          </button>
+                        )}
+                        {isRecording && (
+                          <span style={{ fontSize: "11px", color: "var(--accent-garnet)", animation: "pulse 1s infinite" }}>● Recording…</span>
+                        )}
+                      </div>
+
+                      {captureResUrl && captureResUrl.startsWith("data:audio") && (
+                        <div style={{ marginTop: "10px" }}>
+                          <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "4px" }}>Preview:</div>
+                          <audio src={captureResUrl} controls style={{ width: "100%" }} />
+                        </div>
+                      )}
+
+                      <div className="form-group" style={{ marginTop: "12px" }}>
+                        <label className="form-label" style={{ fontSize: "11px" }}>Or upload an audio file</label>
+                        <input
+                          type="file"
+                          className="form-input"
+                          accept="audio/*"
+                          onChange={handleCaptureFileChange}
+                          style={{ padding: "4px" }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    /* DEFAULT: URL + file upload */
+                    <>
+                      <div className="form-group">
+                        <label className="form-label">Source Link URL</label>
+                        <input
+                          type="text"
+                          className="form-input"
+                          placeholder="E.g., https://github.com/cyberbotics/webots"
+                          value={captureResUrl}
+                          onChange={(e) => setCaptureResUrl(e.target.value)}
+                        />
+                      </div>
+
+                      <div className="form-group" style={{ borderTop: "1px dashed var(--border-color)", paddingTop: "12px", marginTop: "12px" }}>
+                        <label className="form-label" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span>Upload Media / Document File</span>
+                          <span style={{ color: "var(--accent-brass)", fontSize: "10px" }}>Offline storage</span>
+                        </label>
+                        <input
+                          type="file"
+                          className="form-input"
+                          accept="image/*,video/*,application/pdf,.ppt,.pptx,.doc,.docx,.xls,.xlsx,.txt"
+                          onChange={handleCaptureFileChange}
+                          style={{ padding: "4px" }}
+                        />
+                      </div>
+
+                      {captureResUrl && captureResUrl.startsWith("data:") && (
+                        <div style={{ marginTop: "12px", borderRadius: "8px", overflow: "hidden", border: "1px solid var(--border-color)", padding: "8px", background: "rgba(0,0,0,0.2)" }}>
+                          <div style={{ fontSize: "11px", color: "var(--text-dim)", marginBottom: "4px" }}>File Preview:</div>
+                          {captureResUrl.startsWith("data:image/") ? (
+                            <img src={captureResUrl} alt="Preview" style={{ width: "100%", maxHeight: "150px", objectFit: "contain", borderRadius: "4px" }} />
+                          ) : captureResUrl.startsWith("data:video/") ? (
+                            <video src={captureResUrl} controls style={{ width: "100%", maxHeight: "150px", borderRadius: "4px" }} />
+                          ) : null}
+                        </div>
+                      )}
+                    </>
                   )}
                 </>
               ) : (
@@ -2514,8 +3372,17 @@ export default function App() {
                       setCaptureOpen(false);
                     }
                   } else {
-                    // Resource capture
-                    quickCaptureSave(selectEl.value, "resource", captureResUrl, captureResTitle, captureResType);
+                    // For Discussion: encode pasted transcript as a text data URL
+                    if (captureResType === "Discussion") {
+                      if (!captureResTranscript.trim()) {
+                        setAlertDialog({ message: "Please paste your chat log before saving." });
+                        return;
+                      }
+                      const encoded = "data:text/plain;charset=utf-8," + encodeURIComponent(captureResTranscript);
+                      quickCaptureSave(selectEl.value, "resource", encoded, captureResTitle || "Discussion Log", "Discussion");
+                    } else {
+                      quickCaptureSave(selectEl.value, "resource", captureResUrl, captureResTitle, captureResType);
+                    }
                     setCaptureOpen(false);
                   }
                 }}
@@ -2627,6 +3494,68 @@ export default function App() {
                   <span>Status: <strong>{syncStatus}</strong></span>
                   {lastSync && <span>Last sync: <strong>{lastSync}</strong></span>}
                 </div>
+              </div>
+
+              {/* Storage Overview */}
+              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                  <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Storage Overview</h4>
+                  <button
+                    style={{ fontSize: "11px", background: "none", border: "1px solid var(--border-color)", color: "var(--text-secondary)", borderRadius: "6px", padding: "3px 8px", cursor: "pointer" }}
+                    onClick={refreshStorageInfo}
+                  >
+                    ↻ Refresh
+                  </button>
+                </div>
+                {storageInfo ? (() => {
+                  const fmtBytes = (b) => {
+                    if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GB";
+                    if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+                    if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
+                    return b + " B";
+                  };
+                  const barColor = storageInfo.percent > 80 ? "var(--accent-garnet)" : storageInfo.percent > 50 ? "var(--accent-brass)" : "var(--accent-verdigris)";
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                      {/* Total quota bar */}
+                      {storageInfo.quota > 0 && (
+                        <div>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", color: "var(--text-secondary)", marginBottom: "5px" }}>
+                            <span>Total Browser Storage (IndexedDB + Cache)</span>
+                            <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+                              {fmtBytes(storageInfo.usage)} / {fmtBytes(storageInfo.quota)}
+                            </span>
+                          </div>
+                          <div style={{ background: "var(--bg-panel)", borderRadius: "6px", height: "10px", overflow: "hidden", border: "1px solid var(--border-color)" }}>
+                            <div style={{ width: `${Math.min(storageInfo.percent, 100).toFixed(1)}%`, height: "100%", background: barColor, borderRadius: "6px", transition: "width 0.4s ease" }} />
+                          </div>
+                          <div style={{ fontSize: "10px", color: barColor, marginTop: "3px", textAlign: "right" }}>
+                            {storageInfo.percent.toFixed(1)}% used — {fmtBytes(storageInfo.quota - storageInfo.usage)} free
+                          </div>
+                        </div>
+                      )}
+                      {/* localStorage row */}
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                        <span style={{ color: "var(--text-secondary)" }}>localStorage (topics, metadata)</span>
+                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{fmtBytes(storageInfo.lsUsed)}</span>
+                      </div>
+                      {/* Offline attachments row */}
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                        <span style={{ color: "var(--text-secondary)" }}>IndexedDB (files, audio, videos)</span>
+                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+                          {fmtBytes(Math.max(0, storageInfo.usage - storageInfo.lsUsed))}
+                        </span>
+                      </div>
+                      {storageInfo.percent > 80 && (
+                        <div style={{ fontSize: "11px", color: "var(--accent-garnet)", padding: "6px 10px", background: "rgba(166,83,61,0.1)", borderRadius: "6px", border: "1px solid var(--accent-garnet)" }}>
+                          ⚠ Storage is nearly full. Consider exporting your vault and clearing old attachments.
+                        </div>
+                      )}
+                    </div>
+                  );
+                })() : (
+                  <div style={{ fontSize: "12px", color: "var(--text-dim)" }}>Click Refresh to load storage details.</div>
+                )}
               </div>
 
               <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
@@ -2828,6 +3757,18 @@ export default function App() {
                 />
               </div>
               <div className="form-group">
+                <label className="form-label">Source Type</label>
+                <select
+                  className="form-input"
+                  value={editingSource.type}
+                  onChange={(e) => setEditingSource({ ...editingSource, type: e.target.value })}
+                >
+                  <option value="Website">Website</option>
+                  <option value="Book">Book</option>
+                  <option value="Video">Video</option>
+                </select>
+              </div>
+              <div className="form-group">
                 <label className="form-label">Source URL</label>
                 <input
                   type="text"
@@ -2837,12 +3778,72 @@ export default function App() {
                   placeholder="https://..."
                 />
               </div>
+              {(editingSource.type === "Book" || editingSource.type === "Website") && (
+                <div className="form-group">
+                  <label className="form-label">Author</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingSource.author || ""}
+                    onChange={(e) => setEditingSource({ ...editingSource, author: e.target.value })}
+                    placeholder="Author name..."
+                  />
+                </div>
+              )}
+              {editingSource.type === "Book" && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">Publisher</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={editingSource.publisher || ""}
+                      onChange={(e) => setEditingSource({ ...editingSource, publisher: e.target.value })}
+                      placeholder="Publisher name..."
+                    />
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Pages</label>
+                    <input
+                      type="text"
+                      className="form-input"
+                      value={editingSource.pages || ""}
+                      onChange={(e) => setEditingSource({ ...editingSource, pages: e.target.value })}
+                      placeholder="Number of pages..."
+                    />
+                  </div>
+                </>
+              )}
+              {editingSource.type === "Video" && (
+                <div className="form-group">
+                  <label className="form-label">Video Channel</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingSource.channel || ""}
+                    onChange={(e) => setEditingSource({ ...editingSource, channel: e.target.value })}
+                    placeholder="Channel name..."
+                  />
+                </div>
+              )}
+              {editingSource.type === "Website" && (
+                <div className="form-group">
+                  <label className="form-label">Published Year/Date</label>
+                  <input
+                    type="text"
+                    className="form-input"
+                    value={editingSource.date || ""}
+                    onChange={(e) => setEditingSource({ ...editingSource, date: e.target.value })}
+                    placeholder="E.g., 2026"
+                  />
+                </div>
+              )}
               <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "10px" }}>
                 <button className="btn-ghost" onClick={() => setEditingSource(null)}>Cancel</button>
                 <button
                   className="btn-solid"
                   style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }}
-                  onClick={() => saveSourceEdit(editingSource.id, editingSource.title, editingSource.url)}
+                  onClick={() => saveSourceEdit(editingSource.id, editingSource)}
                 >
                   Save Changes
                 </button>
@@ -2851,6 +3852,74 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* Custom Edit Discovery Modal */}
+      {editingDiscovery && (
+        <div className="modal-overlay" onClick={() => setEditingDiscovery(null)}>
+          <div className="modal-card" style={{ maxWidth: "450px" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Edit Discovery</h3>
+              <button className="drawer-close-btn" onClick={() => setEditingDiscovery(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className="form-group">
+                <label className="form-label">Discovery Title</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  value={editingDiscovery.title}
+                  onChange={(e) => setEditingDiscovery({ ...editingDiscovery, title: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Statement</label>
+                <textarea
+                  className="form-textarea"
+                  rows={4}
+                  value={editingDiscovery.statement}
+                  onChange={(e) => setEditingDiscovery({ ...editingDiscovery, statement: e.target.value })}
+                />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Verification</label>
+                <select
+                  className="form-input"
+                  value={editingDiscovery.verification}
+                  onChange={(e) => setEditingDiscovery({ ...editingDiscovery, verification: e.target.value })}
+                >
+                  <option value="Unverified">Unverified</option>
+                  <option value="Verified">Verified</option>
+                  <option value="To Test">To Test</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Visibility</label>
+                <select
+                  className="form-input"
+                  value={editingDiscovery.visibility}
+                  onChange={(e) => setEditingDiscovery({ ...editingDiscovery, visibility: e.target.value })}
+                >
+                  <option value="Private">Private</option>
+                  <option value="Public">Public</option>
+                </select>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "10px" }}>
+                <button className="btn-ghost" onClick={() => setEditingDiscovery(null)}>Cancel</button>
+                <button
+                  className="btn-solid"
+                  style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }}
+                  onClick={saveDiscoveryEdit}
+                >
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
 
     </div>
   );
