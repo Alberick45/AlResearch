@@ -4140,7 +4140,7 @@ export default function App() {
                               </span>
                             </div>
                             <div style={{ background: "var(--bg-panel)", borderRadius: "6px", height: "10px", overflow: "hidden", border: "1px solid var(--border-color)" }}>
-                              <div style={{ width: `${Math.min(storageInfo.percent, 100).toFixed(1)}%`, height: "100%", background: barColor, borderRadius: "6px", transition: "width 0.4s ease" }} />
+                              <div style={{ width: `${storageInfo.usage > 0 ? Math.max(1.5, Math.min(storageInfo.percent, 100)) : 0}%`, height: "100%", background: barColor, borderRadius: "6px", transition: "width 0.4s ease" }} />
                             </div>
                             <div style={{ fontSize: "10px", color: barColor, marginTop: "3px", textAlign: "right" }}>
                               {storageInfo.percent.toFixed(1)}% used — {fmtBytes(storageInfo.quota - storageInfo.usage)} free
