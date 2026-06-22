@@ -325,6 +325,57 @@ Standardized everywhere. Supported natively by Windows Explorer, macOS Finder, L
 
 ---
 
+# Technology Name: Web Crypto API (Symmetric AES-GCM)
+
+## Category
+Security / Cryptography / Zero-Trust Configuration
+
+## What It Is
+The Web Crypto API is an interface allowing web applications to perform basic cryptographic operations, such as hashing, signature generation, encryption, and decryption. We use it to symmetrically encrypt sync credentials behind a single, user-friendly Cryptographic Sync Key (Vault Key).
+
+## Why It Exists
+Securely syncing files over the cloud requires sensitive credentials (WebDAV URL, username, application passwords). Storing or sharing these in plain text is a severe security risk. The Web Crypto API allows us to run standard AES-GCM encryption completely in-browser without sending credentials to any backend server.
+
+## Internal Architecture
+- **PBKDF2 Key Derivation**: Derives a secure 256-bit symmetric encryption key from the user's password PIN and a random salt using 100,000 iterations.
+- **AES-GCM (Galois/Counter Mode)**: An authenticated encryption algorithm that provides both confidentiality and data integrity checks, ensuring the key cannot be tampered with.
+- **Base64 Serialization**: Packs the random salt, Initialization Vector (IV), and ciphertext together into a single portable text key starting with `RKV_KEY_v1_`.
+
+## Core Concepts
+- PBKDF2 Key Derivation
+- AES-GCM Encryption / Decryption
+- Salt and Initialization Vector (IV)
+- Base64 String Serialization
+
+## Advantages
+- **Zero-Trust Security**: Encryption happens purely client-side; no server ever sees the password or credentials.
+- **Portability**: Credentials are compiled into a single copy-pasteable key string ideal for backup or sharing on WhatsApp.
+- **High Performance**: Native browser implementation written in compiled code, executing instantly.
+
+## Disadvantages
+- Keys are deterministic based on the user's PIN: if a user forgets their PIN, the exported key cannot be decrypted.
+
+## Alternatives
+- **CryptoJS**: A JavaScript library, but heavier and lacks native hardware-acceleration.
+- **Backend Key Management Services (KMS)**: Destroys the serverless, offline-first promise of the application.
+
+## Why It Was Selected For This Project
+The *Research Knowledge Vault* is dedicated to complete user privacy and offline-first execution. Using Web Crypto API, we solve the UX challenge of managing complex connection details by consolidating them into a single secure key token, fully managed locally.
+
+## Future Use Cases
+- Encrypting local database backup files at rest.
+- End-to-end encrypted collaborative topics.
+
+## Industry Adoption
+Standardized W3C specification implemented in all major modern web browsers (Chrome, Firefox, Safari, Edge) and Node.js.
+
+## Learning Roadmap
+- **Beginner**: Web Crypto `window.crypto.subtle` basic usage.
+- **Intermediate**: AES-GCM encryption, importing raw key bytes, using IVs.
+- **Advanced**: Key derivation functions (PBKDF2), handling cryptographically secure random values.
+
+---
+
 # System Architecture Breakdown
 
 The entire architecture revolves around an offline-first, write-once-run-anywhere philosophy.
@@ -372,6 +423,7 @@ Local Android Storage
 | **SQLite** | Local Relational Data | Medium | High (Local) | Low (Distributed) | Medium | Offline apps, Mobile apps, Edge devices |
 | **Electron** | Desktop Wrapper | Medium | Low (RAM heavy) | Medium | Medium | Web-based desktop apps |
 | **Capacitor** | Mobile Wrapper | Low | Medium | Medium | Low | Rapid mobile MVPs, Enterprise apps |
+| **Web Crypto API** | Symmetric Credentials Encryption | Low | Very High | High | Medium | Zero-trust credentials, local encryption |
 
 ---
 

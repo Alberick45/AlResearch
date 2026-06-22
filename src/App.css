@@ -2554,4 +2554,158 @@ a {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Smart Sync Status Dot & Pulse Animations                           */
+/* ------------------------------------------------------------------ */
+.sync-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background-color 0.3s ease;
+}
+
+.sync-dot.idle {
+  background-color: var(--text-dim);
+}
+
+.sync-dot.syncing {
+  background-color: var(--accent-brass);
+  animation: sync-dot-pulse-syncing 1s infinite alternate ease-in-out;
+}
+
+.sync-dot.success {
+  background-color: var(--accent-verdigris);
+  animation: sync-dot-pulse-success 2s infinite ease-in-out;
+}
+
+.sync-dot.error {
+  background-color: var(--accent-garnet);
+}
+
+@keyframes sync-dot-pulse-syncing {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.6;
+    box-shadow: 0 0 0 0px rgba(201, 151, 77, 0.4);
+  }
+  100% {
+    transform: scale(1.1);
+    opacity: 1;
+    box-shadow: 0 0 0 6px rgba(201, 151, 77, 0);
+  }
+}
+
+@keyframes sync-dot-pulse-success {
+  0% {
+    box-shadow: 0 0 0 0px rgba(94, 133, 119, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 5px rgba(94, 133, 119, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0px rgba(94, 133, 119, 0);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Interactive UI focus tracking: Scanner Sweep & Accent Shift       */
+/* ------------------------------------------------------------------ */
+
+/* 1. Scanner Sweep */
+.resource-card,
+.note-card,
+.discovery-card,
+.stat-card,
+.sidebar-item,
+.topic-item,
+.resource-detail-card,
+.resource-mini-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.resource-card::before,
+.note-card::before,
+.discovery-card::before,
+.stat-card::before,
+.sidebar-item::before,
+.topic-item::before,
+.resource-detail-card::before,
+.resource-mini-card::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -150%;
+  width: 50%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.05),
+    transparent
+  );
+  transform: skewX(-25deg);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.resource-card:hover::before,
+.note-card:hover::before,
+.discovery-card:hover::before,
+.stat-card:hover::before,
+.sidebar-item:hover::before,
+.topic-item:hover::before,
+.resource-detail-card:hover::before,
+.resource-mini-card:hover::before {
+  animation: scanner-sweep-line 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+}
+
+@keyframes scanner-sweep-line {
+  0% {
+    left: -150%;
+  }
+  100% {
+    left: 150%;
+  }
+}
+
+/* 2. Accent Shift (Using Left Borders and dynamic glows) */
+.sidebar-item:hover,
+.topic-item:hover {
+  border-left-width: 6px !important;
+}
+
+.stat-card,
+.resource-detail-card,
+.resource-mini-card,
+.resource-card,
+.note-card,
+.discovery-card {
+  transition: all 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94) !important;
+}
+
+.stat-card:hover,
+.resource-detail-card:hover,
+.resource-mini-card:hover {
+  border-left-width: 8px !important;
+  transform: translateY(-2px);
+  box-shadow: inset 4px 0 12px -3px rgba(255, 255, 255, 0.02), var(--shadow-lg);
+}
+
+/* Accent shift glow bleed effect for note and discovery cards */
+.note-card:hover {
+  border-left-color: var(--accent-brass) !important;
+  box-shadow: inset 4px 0 12px -3px rgba(201, 151, 77, 0.15), var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.discovery-card:hover {
+  border-left-color: var(--accent-verdigris) !important;
+  box-shadow: inset 4px 0 12px -3px rgba(94, 133, 119, 0.15), var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+
 

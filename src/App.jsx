@@ -145,9 +145,86 @@ const sanitizeAndMigrateTopics = (rawTopics) => {
       return { ...topic, id: newId };
     }
     seenIds.add(topic.id);
-    return topic;
   });
 };
+
+/* ------------------------------------------------------------------ */
+/* Cryptographic Puzzle Key Helpers                                  */
+/* ------------------------------------------------------------------ */
+
+async function deriveCryptoKey(pin, salt) {
+  const enc = new TextEncoder();
+  const baseKey = await window.crypto.subtle.importKey(
+    "raw",
+    enc.encode(pin),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  );
+  return window.crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: salt,
+      iterations: 100000,
+      hash: "SHA-256"
+    },
+    baseKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+async function encryptData(dataObj, pin) {
+  const enc = new TextEncoder();
+  const salt = window.crypto.getRandomValues(new Uint8Array(16));
+  const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  
+  const key = await deriveCryptoKey(pin, salt);
+  const encrypted = await window.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    enc.encode(JSON.stringify(dataObj))
+  );
+
+  const encryptedBytes = new Uint8Array(encrypted);
+  const combined = new Uint8Array(salt.length + iv.length + encryptedBytes.length);
+  combined.set(salt, 0);
+  combined.set(iv, salt.length);
+  combined.set(encryptedBytes, salt.length + iv.length);
+
+  let binary = "";
+  for (let i = 0; i < combined.length; i++) {
+    binary += String.fromCharCode(combined[i]);
+  }
+  return "RKV_KEY_v1_" + btoa(binary);
+}
+
+async function decryptData(encryptedStr, pin) {
+  if (!encryptedStr.startsWith("RKV_KEY_v1_")) {
+    throw new Error("Invalid key format");
+  }
+  const base64 = encryptedStr.replace("RKV_KEY_v1_", "");
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+
+  const salt = bytes.slice(0, 16);
+  const iv = bytes.slice(16, 28);
+  const ciphertext = bytes.slice(28);
+
+  const key = await deriveCryptoKey(pin, salt);
+  const decrypted = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: iv },
+    key,
+    ciphertext
+  );
+
+  const dec = new TextDecoder();
+  return JSON.parse(dec.decode(decrypted));
+}
 
 /* ------------------------------------------------------------------ */
 /* IndexedDB Attachment Database Helper                               */
@@ -614,6 +691,7 @@ export default function App() {
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("profile"); // 'profile' | 'sync' | 'storage'
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [storageInfo, setStorageInfo] = useState(null); // { usage, quota, percent, lsUsed }
   const [captureOpen, setCaptureOpen] = useState(false);
@@ -707,6 +785,7 @@ export default function App() {
   // Settings PIN Change Drafts
   const [oldPinInput, setOldPinInput] = useState("");
   const [newPinInput, setNewPinInput] = useState("");
+  const [cryptoKeyInput, setCryptoKeyInput] = useState("");
 
   // Search
   const [searchQuery, setSearchQuery] = useState("");
@@ -1202,6 +1281,77 @@ export default function App() {
     setNewPinInput("");
     setSettingsModalOpen(false);
     showToast("Password PIN successfully changed.");
+  };
+
+  const getCurrentUserPin = () => {
+    try {
+      const savedProfiles = localStorage.getItem("rkv_profiles");
+      const profiles = savedProfiles ? JSON.parse(savedProfiles) : {};
+      return profiles[currentUser]?.password || "";
+    } catch (err) {
+      console.error("Failed to get current user PIN", err);
+      return "";
+    }
+  };
+
+  const handleExportCryptoKey = async () => {
+    const pin = getCurrentUserPin();
+    if (!pin) {
+      setAlertDialog({ message: "Unable to retrieve user PIN. Please log in again." });
+      return;
+    }
+    
+    const payload = {
+      ncUrl: ncUrl.trim(),
+      ncUser: ncUser.trim(),
+      ncPass: ncPass.trim(),
+      ncPath: ncPath.trim()
+    };
+    
+    if (!payload.ncUrl || !payload.ncUser || !payload.ncPass) {
+      setAlertDialog({ message: "Please configure your Nextcloud connection details completely before exporting the key." });
+      return;
+    }
+    
+    try {
+      const encryptedKey = await encryptData(payload, pin);
+      await navigator.clipboard.writeText(encryptedKey);
+      showToast("Encrypted Sync Key copied to clipboard!");
+    } catch (err) {
+      console.error("Encryption failed:", err);
+      setAlertDialog({ message: "Failed to generate cryptographic key." });
+    }
+  };
+
+  const handleImportCryptoKey = async () => {
+    const pin = getCurrentUserPin();
+    if (!pin) {
+      setAlertDialog({ message: "Unable to retrieve user PIN. Please log in again." });
+      return;
+    }
+    
+    const keyVal = cryptoKeyInput.trim();
+    if (!keyVal) {
+      setAlertDialog({ message: "Please paste an encrypted key to import." });
+      return;
+    }
+    
+    try {
+      const decrypted = await decryptData(keyVal, pin);
+      if (decrypted && typeof decrypted === "object") {
+        setNcUrl(decrypted.ncUrl || "");
+        setNcUser(decrypted.ncUser || "");
+        setNcPass(decrypted.ncPass || "");
+        setNcPath(decrypted.ncPath || "vault_backup.json");
+        setCryptoKeyInput("");
+        showToast("Sync settings imported and puzzle solved!");
+      } else {
+        setAlertDialog({ message: "Invalid key format." });
+      }
+    } catch (err) {
+      console.error("Decryption failed:", err);
+      setAlertDialog({ message: "Decryption failed. Please verify that this key was generated by this user profile PIN." });
+    }
   };
 
   const refreshStorageInfo = async () => {
@@ -3731,195 +3881,296 @@ export default function App() {
                 <X size={18} />
               </button>
             </div>
-            <div className="modal-body">
-              <div className="form-group">
-                <label className="form-label">Profile Name</label>
-                <input type="text" className="form-input" value={currentUser} disabled />
-              </div>
+            
+            {/* HCI Grouping Tabs */}
+            <div className="settings-tabs-row" style={{ display: "flex", borderBottom: "1px solid var(--border-light)", padding: "0 24px" }}>
+              <button
+                className={`settings-tab-btn ${settingsTab === "profile" ? "active" : ""}`}
+                onClick={() => setSettingsTab("profile")}
+                style={{
+                  flex: 1,
+                  background: "none",
+                  border: "none",
+                  borderBottom: settingsTab === "profile" ? "2px solid var(--accent-brass)" : "2px solid transparent",
+                  padding: "10px 0",
+                  fontSize: "12.5px",
+                  fontWeight: settingsTab === "profile" ? "600" : "400",
+                  color: settingsTab === "profile" ? "var(--text-primary)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  textAlign: "center",
+                  transition: "all 0.2s"
+                }}
+              >
+                Profile & Security
+              </button>
+              <button
+                className={`settings-tab-btn ${settingsTab === "sync" ? "active" : ""}`}
+                onClick={() => setSettingsTab("sync")}
+                style={{
+                  flex: 1,
+                  background: "none",
+                  border: "none",
+                  borderBottom: settingsTab === "sync" ? "2px solid var(--accent-brass)" : "2px solid transparent",
+                  padding: "10px 0",
+                  fontSize: "12.5px",
+                  fontWeight: settingsTab === "sync" ? "600" : "400",
+                  color: settingsTab === "sync" ? "var(--text-primary)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  textAlign: "center",
+                  transition: "all 0.2s"
+                }}
+              >
+                Sync & Backups
+              </button>
+              <button
+                className={`settings-tab-btn ${settingsTab === "storage" ? "active" : ""}`}
+                onClick={() => setSettingsTab("storage")}
+                style={{
+                  flex: 1,
+                  background: "none",
+                  border: "none",
+                  borderBottom: settingsTab === "storage" ? "2px solid var(--accent-brass)" : "2px solid transparent",
+                  padding: "10px 0",
+                  fontSize: "12.5px",
+                  fontWeight: settingsTab === "storage" ? "600" : "400",
+                  color: settingsTab === "storage" ? "var(--text-primary)" : "var(--text-dim)",
+                  cursor: "pointer",
+                  textAlign: "center",
+                  transition: "all 0.2s"
+                }}
+              >
+                Storage & System
+              </button>
+            </div>
 
-              <form onSubmit={handleChangePin} className="form-group" style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
-                <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "10px" }}>Change Password PIN</h4>
-                <div style={{ display: "flex", gap: "10px" }}>
-                  <input
-                    type="password"
-                    placeholder="Old PIN"
-                    className="form-input"
-                    style={{ flex: 1 }}
-                    value={oldPinInput}
-                    onChange={(e) => setOldPinInput(e.target.value)}
-                  />
-                  <input
-                    type="password"
-                    placeholder="New PIN"
-                    className="form-input"
-                    style={{ flex: 1 }}
-                    value={newPinInput}
-                    onChange={(e) => setNewPinInput(e.target.value)}
-                  />
-                </div>
-                <button type="submit" className="auth-btn-submit" style={{ marginTop: "10px" }}>Update PIN</button>
-              </form>
-
-              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
-                <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Backup Management</h4>
-                <div style={{ display: "flex", gap: "10px" }}>
-                  <button className="desktop-app-btn" onClick={exportData}>Export JSON Vault</button>
-                  <label className="desktop-app-btn" style={{ cursor: "pointer", textAlign: "center" }}>
-                    Import Backup
-                    <input type="file" accept=".json" onChange={importData} style={{ display: "none" }} />
-                  </label>
-                </div>
-              </div>
-
-              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
-                <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Nextcloud Private Cloud Sync</h4>
-                <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
-                  <input
-                    type="text"
-                    placeholder="WebDAV URL (e.g. https://domain.com/remote.php/dav/files/user/)"
-                    className="form-input"
-                    value={ncUrl}
-                    onChange={(e) => setNcUrl(e.target.value)}
-                  />
-                  <div style={{ display: "flex", gap: "8px" }}>
-                    <input
-                      type="text"
-                      placeholder="Username"
-                      className="form-input"
-                      style={{ flex: 1 }}
-                      value={ncUser}
-                      onChange={(e) => setNcUser(e.target.value)}
-                    />
-                    <input
-                      type="password"
-                      placeholder="App Password"
-                      className="form-input"
-                      style={{ flex: 1 }}
-                      value={ncPass}
-                      onChange={(e) => setNcPass(e.target.value)}
-                    />
+            <div className="modal-body" style={{ padding: "20px 24px" }}>
+              {/* TAB 1: PROFILE & SECURITY */}
+              {settingsTab === "profile" && (
+                <>
+                  <div className="form-group">
+                    <label className="form-label">Profile Name</label>
+                    <input type="text" className="form-input" value={currentUser} disabled />
                   </div>
-                  <input
-                    type="text"
-                    placeholder="Backup Path (e.g. vault_backup.json)"
-                    className="form-input"
-                    value={ncPath}
-                    onChange={(e) => setNcPath(e.target.value)}
-                  />
-                </div>
-                
-                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                  <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={syncToNextcloud} disabled={syncStatus === "Syncing"}>
-                    {syncStatus === "Syncing" ? "Syncing..." : "Smart Sync Vault"}
-                  </button>
-                </div>
-                
-                <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--text-dim)", display: "flex", justifyContent: "space-between" }}>
-                  <span>Status: <strong>{syncStatus}</strong></span>
-                  {lastSync && <span>Last sync: <strong>{lastSync}</strong></span>}
-                </div>
-              </div>
 
-              {/* Storage Overview */}
-              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
-                  <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Storage Overview</h4>
-                  <button
-                    style={{ fontSize: "11px", background: "none", border: "1px solid var(--border-color)", color: "var(--text-secondary)", borderRadius: "6px", padding: "3px 8px", cursor: "pointer" }}
-                    onClick={refreshStorageInfo}
-                  >
-                    ↻ Refresh
-                  </button>
-                </div>
-                {storageInfo ? (() => {
-                  const fmtBytes = (b) => {
-                    if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GB";
-                    if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
-                    if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
-                    return b + " B";
-                  };
-                  const barColor = storageInfo.percent > 80 ? "var(--accent-garnet)" : storageInfo.percent > 50 ? "var(--accent-brass)" : "var(--accent-verdigris)";
-                  return (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                      {/* Total quota bar */}
-                      {storageInfo.quota > 0 && (
-                        <div>
-                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", color: "var(--text-secondary)", marginBottom: "5px" }}>
-                            <span>Total Browser Storage (IndexedDB + Cache)</span>
-                            <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
-                              {fmtBytes(storageInfo.usage)} / {fmtBytes(storageInfo.quota)}
-                            </span>
-                          </div>
-                          <div style={{ background: "var(--bg-panel)", borderRadius: "6px", height: "10px", overflow: "hidden", border: "1px solid var(--border-color)" }}>
-                            <div style={{ width: `${Math.min(storageInfo.percent, 100).toFixed(1)}%`, height: "100%", background: barColor, borderRadius: "6px", transition: "width 0.4s ease" }} />
-                          </div>
-                          <div style={{ fontSize: "10px", color: barColor, marginTop: "3px", textAlign: "right" }}>
-                            {storageInfo.percent.toFixed(1)}% used — {fmtBytes(storageInfo.quota - storageInfo.usage)} free
-                          </div>
-                        </div>
-                      )}
-                      {/* localStorage row */}
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                        <span style={{ color: "var(--text-secondary)" }}>localStorage (topics, metadata)</span>
-                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{fmtBytes(storageInfo.lsUsed)}</span>
-                      </div>
-                      {/* Offline attachments row */}
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
-                        <span style={{ color: "var(--text-secondary)" }}>IndexedDB (files, audio, videos)</span>
-                        <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
-                          {fmtBytes(Math.max(0, storageInfo.usage - storageInfo.lsUsed))}
-                        </span>
-                      </div>
-                      {storageInfo.percent > 80 && (
-                        <div style={{ fontSize: "11px", color: "var(--accent-garnet)", padding: "6px 10px", background: "rgba(166,83,61,0.1)", borderRadius: "6px", border: "1px solid var(--accent-garnet)" }}>
-                          ⚠ Storage is nearly full. Consider exporting your vault and clearing old attachments.
-                        </div>
-                      )}
+                  <form onSubmit={handleChangePin} className="form-group" style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "10px" }}>Change Password PIN</h4>
+                    <div style={{ display: "flex", gap: "10px" }}>
+                      <input
+                        type="password"
+                        placeholder="Old PIN"
+                        className="form-input"
+                        style={{ flex: 1 }}
+                        value={oldPinInput}
+                        onChange={(e) => setOldPinInput(e.target.value)}
+                      />
+                      <input
+                        type="password"
+                        placeholder="New PIN"
+                        className="form-input"
+                        style={{ flex: 1 }}
+                        value={newPinInput}
+                        onChange={(e) => setNewPinInput(e.target.value)}
+                      />
                     </div>
-                  );
-                })() : (
-                  <div style={{ fontSize: "12px", color: "var(--text-dim)" }}>Click Refresh to load storage details.</div>
-                )}
-              </div>
+                    <button type="submit" className="auth-btn-submit" style={{ marginTop: "10px" }}>Update PIN</button>
+                  </form>
 
-              {/* Trashcan Management */}
-              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px", marginBottom: "14px" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                  <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Trashcan (Tombstones)</h4>
-                  <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>{deletedItems.length} items</span>
-                </div>
-                {deletedItems.length > 0 ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                    <div style={{ maxHeight: "120px", overflowY: "auto", background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-light)", borderRadius: "6px", padding: "8px", fontSize: "11px" }}>
-                      {deletedItems.map((item, idx) => (
-                        <div key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: idx < deletedItems.length - 1 ? "1px solid var(--border-light)" : "none" }}>
-                          <span style={{ color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginRight: "10px" }}>
-                            <strong style={{ color: "var(--text-dim)" }}>{item.type}:</strong> {item.title}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                    <button className="btn-solid" style={{ background: "var(--bg-panel)", border: "1px solid var(--border-color)", color: "var(--text-primary)", width: "100%", fontSize: "12px", padding: "6px" }} 
-                      onClick={() => {
-                        setConfirmDialog({
-                          message: "Are you sure you want to permanently empty the trash? Note: Emptying the trash removes the sync tombstones. If a remote device still has these files, they may reappear on your next sync.",
-                          onConfirm: () => setDeletedItems([])
-                        });
-                      }}>
-                      Empty Trashcan
+                  <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", color: "var(--accent-garnet)", marginBottom: "8px" }}>Danger Zone</h4>
+                    <button className="btn-solid" style={{ background: "var(--accent-garnet)", color: "white", width: "100%" }} onClick={handleClearAllData}>
+                      Clear All Vault Data
                     </button>
                   </div>
-                ) : (
-                  <div style={{ fontSize: "11px", color: "var(--text-dim)" }}>Trashcan is empty.</div>
-                )}
-              </div>
+                </>
+              )}
 
-              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
-                <h4 style={{ fontSize: "13px", fontWeight: "600", color: "var(--accent-garnet)", marginBottom: "8px" }}>Danger Zone</h4>
-                <button className="btn-solid" style={{ background: "var(--accent-garnet)", color: "white", width: "100%" }} onClick={handleClearAllData}>
-                  Clear All Vault Data
-                </button>
-              </div>
+              {/* TAB 2: SYNC & BACKUPS */}
+              {settingsTab === "sync" && (
+                <>
+                  <div>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Smart Sync (Cloud Vault)</h4>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
+                      <input
+                        type="text"
+                        placeholder="WebDAV URL (e.g. https://domain.com/remote.php/dav/files/user/)"
+                        className="form-input"
+                        value={ncUrl}
+                        onChange={(e) => setNcUrl(e.target.value)}
+                      />
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <input
+                          type="text"
+                          placeholder="Username"
+                          className="form-input"
+                          style={{ flex: 1 }}
+                          value={ncUser}
+                          onChange={(e) => setNcUser(e.target.value)}
+                        />
+                        <input
+                          type="password"
+                          placeholder="App Password"
+                          className="form-input"
+                          style={{ flex: 1 }}
+                          value={ncPass}
+                          onChange={(e) => setNcPass(e.target.value)}
+                        />
+                      </div>
+                      <input
+                        type="text"
+                        placeholder="Backup Path (e.g. vault_backup.json)"
+                        className="form-input"
+                        value={ncPath}
+                        onChange={(e) => setNcPath(e.target.value)}
+                      />
+                    </div>
+                    
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                      <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={syncToNextcloud} disabled={syncStatus === "Syncing"}>
+                        {syncStatus === "Syncing" ? "Syncing..." : "Smart Sync Vault"}
+                      </button>
+                    </div>
+                    
+                    <div style={{ marginTop: "8px", fontSize: "11px", color: "var(--text-dim)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <span className={`sync-dot ${syncStatus.toLowerCase()}`} />
+                        Status: <strong>{syncStatus}</strong>
+                      </span>
+                      {lastSync && <span>Last sync: <strong>{lastSync}</strong></span>}
+                    </div>
+
+                    {/* Cryptographic Sync Key Import/Export */}
+                    <div style={{ marginTop: "12px", paddingTop: "12px", borderTop: "1px dashed var(--border-light)" }}>
+                      <h5 style={{ fontSize: "12px", fontWeight: "600", margin: "0 0 6px 0", color: "var(--text-secondary)" }}>Cryptographic Sync Key</h5>
+                      <p style={{ fontSize: "11px", color: "var(--text-dim)", margin: "0 0 8px 0" }}>
+                        Share or backup your cloud connection credentials as a single encrypted token (safe for WhatsApp/Notepad).
+                      </p>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <input
+                            type="text"
+                            placeholder="Paste Encrypted Sync Key here to import..."
+                            className="form-input"
+                            style={{ flex: 1, fontSize: "11.5px", fontFamily: "var(--font-mono)" }}
+                            value={cryptoKeyInput}
+                            onChange={(e) => setCryptoKeyInput(e.target.value)}
+                          />
+                          <button className="desktop-app-btn" style={{ whiteSpace: "nowrap" }} onClick={handleImportCryptoKey}>Import Key</button>
+                        </div>
+                        <button className="desktop-app-btn" style={{ width: "100%", background: "rgba(255,255,255,0.05)" }} onClick={handleExportCryptoKey}>
+                          Export & Copy Encrypted Sync Key
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Backup Management</h4>
+                    <div style={{ display: "flex", gap: "10px" }}>
+                      <button className="desktop-app-btn" style={{ flex: 1 }} onClick={exportData}>Export JSON Vault</button>
+                      <label className="desktop-app-btn" style={{ flex: 1, cursor: "pointer", textAlign: "center" }}>
+                        Import Backup
+                        <input type="file" accept=".json" onChange={importData} style={{ display: "none" }} />
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Trashcan Management */}
+                  <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                      <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Trashcan (Tombstones)</h4>
+                      <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>{deletedItems.length} items</span>
+                    </div>
+                    {deletedItems.length > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        <div style={{ maxHeight: "120px", overflowY: "auto", background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-light)", borderRadius: "6px", padding: "8px", fontSize: "11px" }}>
+                          {deletedItems.map((item, idx) => (
+                            <div key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: idx < deletedItems.length - 1 ? "1px solid var(--border-light)" : "none" }}>
+                              <span style={{ color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginRight: "10px" }}>
+                                <strong style={{ color: "var(--text-dim)" }}>{item.type}:</strong> {item.title}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                        <button className="btn-solid" style={{ background: "var(--bg-panel)", border: "1px solid var(--border-color)", color: "var(--text-primary)", width: "100%", fontSize: "12px", padding: "6px" }} 
+                          onClick={() => {
+                            setConfirmDialog({
+                              message: "Are you sure you want to permanently empty the trash? Note: Emptying the trash removes the sync tombstones. If a remote device still has these files, they may reappear on your next sync.",
+                              onConfirm: () => setDeletedItems([])
+                            });
+                          }}>
+                          Empty Trashcan
+                        </button>
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: "11px", color: "var(--text-dim)" }}>Trashcan is empty.</div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* TAB 3: STORAGE & SYSTEM */}
+              {settingsTab === "storage" && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }}>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Storage Overview</h4>
+                    <button
+                      style={{ fontSize: "11px", background: "none", border: "1px solid var(--border-color)", color: "var(--text-secondary)", borderRadius: "6px", padding: "3px 8px", cursor: "pointer" }}
+                      onClick={refreshStorageInfo}
+                    >
+                      ↻ Refresh
+                    </button>
+                  </div>
+                  {storageInfo ? (() => {
+                    const fmtBytes = (b) => {
+                      if (b >= 1073741824) return (b / 1073741824).toFixed(2) + " GB";
+                      if (b >= 1048576) return (b / 1048576).toFixed(1) + " MB";
+                      if (b >= 1024) return (b / 1024).toFixed(1) + " KB";
+                      return b + " B";
+                    };
+                    const barColor = storageInfo.percent > 80 ? "var(--accent-garnet)" : storageInfo.percent > 50 ? "var(--accent-brass)" : "var(--accent-verdigris)";
+                    return (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                        {/* Total quota bar */}
+                        {storageInfo.quota > 0 && (
+                          <div>
+                            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", color: "var(--text-secondary)", marginBottom: "5px" }}>
+                              <span>Total Browser Storage (IndexedDB + Cache)</span>
+                              <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+                                {fmtBytes(storageInfo.usage)} / {fmtBytes(storageInfo.quota)}
+                              </span>
+                            </div>
+                            <div style={{ background: "var(--bg-panel)", borderRadius: "6px", height: "10px", overflow: "hidden", border: "1px solid var(--border-color)" }}>
+                              <div style={{ width: `${Math.min(storageInfo.percent, 100).toFixed(1)}%`, height: "100%", background: barColor, borderRadius: "6px", transition: "width 0.4s ease" }} />
+                            </div>
+                            <div style={{ fontSize: "10px", color: barColor, marginTop: "3px", textAlign: "right" }}>
+                              {storageInfo.percent.toFixed(1)}% used — {fmtBytes(storageInfo.quota - storageInfo.usage)} free
+                            </div>
+                          </div>
+                        )}
+                        {/* localStorage row */}
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                          <span style={{ color: "var(--text-secondary)" }}>localStorage (topics, metadata)</span>
+                          <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{fmtBytes(storageInfo.lsUsed)}</span>
+                        </div>
+                        {/* Offline attachments row */}
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11.5px", padding: "8px 10px", background: "rgba(255,255,255,0.03)", borderRadius: "6px", border: "1px solid var(--border-color)" }}>
+                          <span style={{ color: "var(--text-secondary)" }}>IndexedDB (files, audio, videos)</span>
+                          <span style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
+                            {fmtBytes(Math.max(0, storageInfo.usage - storageInfo.lsUsed))}
+                          </span>
+                        </div>
+                        {storageInfo.percent > 80 && (
+                          <div style={{ fontSize: "11px", color: "var(--accent-garnet)", padding: "6px 10px", background: "rgba(166,83,61,0.1)", borderRadius: "6px", border: "1px solid var(--accent-garnet)" }}>
+                            ⚠ Storage is nearly full. Consider exporting your vault and clearing old attachments.
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })() : (
+                    <div style={{ fontSize: "12px", color: "var(--text-dim)" }}>Click Refresh to load storage details.</div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         </div>
