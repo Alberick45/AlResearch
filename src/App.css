@@ -71,6 +71,12 @@ button, input, select, textarea {
   color: inherit;
 }
 
+a {
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  word-break: break-all;
+}
+
 /* Scrollbar customization */
 ::-webkit-scrollbar {
   width: 6px;

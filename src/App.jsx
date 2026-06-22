@@ -600,6 +600,15 @@ export default function App() {
     }
     return [];
   });
+  // Tombstone Tracker (list of { id, type, title, deletedAt })
+  const [deletedItems, setDeletedItems] = useState(() => {
+    const activeUser = localStorage.getItem("rkv_active_user");
+    if (activeUser) {
+      const saved = localStorage.getItem(`rkv_deleted_${activeUser}`);
+      return saved ? JSON.parse(saved) : [];
+    }
+    return [];
+  });
 
   // UI Dropdowns & Modals
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
@@ -614,6 +623,28 @@ export default function App() {
   const [captureResUrl, setCaptureResUrl] = useState("");
   const [captureResTranscript, setCaptureResTranscript] = useState("");
   const [toast, setToast] = useState(null);
+
+  // Auto-close modals on navigation or Escape key
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === "Escape") {
+        setSettingsModalOpen(false);
+        setHelpModalOpen(false);
+        setCaptureOpen(false);
+        setAlertDialog(null);
+        setConfirmDialog(null);
+        setEditingResource(null);
+        setEditingSource(null);
+        setEditingDiscovery(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    setSettingsModalOpen(false);
+  }, [activeView, activeTopicId]);
 
   useEffect(() => {
     if (captureOpen) {
@@ -774,6 +805,12 @@ export default function App() {
     }
   }, [recentlyViewed, currentUser]);
 
+  useEffect(() => {
+    if (currentUser) {
+      localStorage.setItem(`rkv_deleted_${currentUser}`, JSON.stringify(deletedItems));
+    }
+  }, [deletedItems, currentUser]);
+
   const activeTopic = topics.find((t) => t.id === activeTopicId) || null;
   const accentHex = activeTopic ? (ACCENTS[activeTopic.accent] || "#C9974D") : "#C9974D";
 
@@ -823,6 +860,7 @@ export default function App() {
       topics,
       unsortedResources,
       recentlyViewed,
+      deletedItems,
       _attachments: attachments,        // keyed by "attachment_r_xxx"
       _exportedAt: new Date().toISOString(),
       _version: 2
@@ -869,6 +907,7 @@ export default function App() {
           if (parsed.topics) setTopics(sanitizeAndMigrateTopics(parsed.topics));
           if (parsed.unsortedResources) setUnsortedResources(parsed.unsortedResources);
           if (parsed.recentlyViewed) setRecentlyViewed(parsed.recentlyViewed);
+          if (parsed.deletedItems) setDeletedItems(parsed.deletedItems);
           if (parsed.topics && parsed.topics.length > 0) {
             const cleanTopics = sanitizeAndMigrateTopics(parsed.topics);
             setActiveTopicId(cleanTopics[0].id);
@@ -917,30 +956,120 @@ export default function App() {
       return;
     }
     setSyncStatus("Syncing");
-    const data = {
-      topics,
-      unsortedResources,
-      recentlyViewed
-    };
+
     try {
+      // 1. PULL FIRST
+      let remoteData = null;
+      try {
+        const pullRes = await fetch(url, { method: "GET", headers: getNextcloudHeaders() });
+        if (pullRes.ok) {
+          remoteData = await pullRes.json();
+        }
+      } catch (err) {
+        console.warn("Could not pull remote data for merge (it might not exist yet):", err);
+      }
+
+      // 2. MERGE LOGIC
+      let finalTopics = [...topics];
+      let finalUnsorted = [...unsortedResources];
+      let finalDeleted = [...deletedItems];
+
+      if (remoteData) {
+        // Merge deletedItems: Combine local and remote tombstones
+        const remoteDeleted = remoteData.deletedItems || [];
+        const mergedDeletedIds = new Set([...finalDeleted.map(d => d.id), ...remoteDeleted.map(d => d.id)]);
+        finalDeleted = Array.from(mergedDeletedIds).map(id => 
+          finalDeleted.find(d => d.id === id) || remoteDeleted.find(d => d.id === id)
+        );
+
+        // Merge Unsorted
+        const remoteUnsorted = remoteData.unsortedResources || [];
+        remoteUnsorted.forEach(remoteRes => {
+          if (!finalUnsorted.find(r => r.id === remoteRes.id) && !mergedDeletedIds.has(remoteRes.id)) {
+            finalUnsorted.push(remoteRes);
+          }
+        });
+        finalUnsorted = finalUnsorted.filter(r => !mergedDeletedIds.has(r.id));
+
+        // Merge Topics
+        const remoteTopics = remoteData.topics || [];
+        remoteTopics.forEach(remoteTopic => {
+          if (mergedDeletedIds.has(remoteTopic.id)) return;
+
+          const localTopicIndex = finalTopics.findIndex(t => t.id === remoteTopic.id);
+          if (localTopicIndex === -1) {
+            finalTopics.push(remoteTopic); // Brand new topic from remote
+          } else {
+            // Deep Merge inside the Topic
+            const localTopic = finalTopics[localTopicIndex];
+            
+            const mergedRes = [...localTopic.resources];
+            (remoteTopic.resources || []).forEach(r => {
+              if (!mergedRes.find(x => x.id === r.id) && !mergedDeletedIds.has(r.id)) mergedRes.push(r);
+            });
+
+            const mergedNotes = [...localTopic.notes];
+            (remoteTopic.notes || []).forEach(n => {
+              if (!mergedNotes.find(x => x.id === n.id) && !mergedDeletedIds.has(n.id)) mergedNotes.push(n);
+            });
+
+            const mergedDisc = [...localTopic.discoveries];
+            (remoteTopic.discoveries || []).forEach(d => {
+              if (!mergedDisc.find(x => x.id === d.id) && !mergedDeletedIds.has(d.id)) mergedDisc.push(d);
+            });
+            
+            const mergedSources = [...localTopic.sources];
+            (remoteTopic.sources || []).forEach(s => {
+              if (!mergedSources.find(x => x.id === s.id) && !mergedDeletedIds.has(s.id)) mergedSources.push(s);
+            });
+
+            finalTopics[localTopicIndex] = {
+              ...localTopic,
+              resources: mergedRes.filter(x => !mergedDeletedIds.has(x.id)),
+              notes: mergedNotes.filter(x => !mergedDeletedIds.has(x.id)),
+              discoveries: mergedDisc.filter(x => !mergedDeletedIds.has(x.id)),
+              sources: mergedSources.filter(x => !mergedDeletedIds.has(x.id))
+            };
+          }
+        });
+        
+        finalTopics = finalTopics.filter(t => !mergedDeletedIds.has(t.id));
+      }
+
+      // 3. Update Local State with merged data
+      setTopics(finalTopics);
+      setUnsortedResources(finalUnsorted);
+      setDeletedItems(finalDeleted);
+
+      // 4. PUSH MERGED DATA
+      const data = {
+        topics: finalTopics,
+        unsortedResources: finalUnsorted,
+        recentlyViewed,
+        deletedItems: finalDeleted
+      };
+
       const response = await fetch(url, {
         method: "PUT",
         headers: getNextcloudHeaders(),
         body: JSON.stringify(data, null, 2)
       });
+      
       if (response.ok) {
         const timeStr = new Date().toLocaleTimeString();
         setSyncStatus("Success");
         setLastSync(timeStr);
         localStorage.setItem("rkv_nc_last_sync", timeStr);
-        showToast("Vault successfully uploaded to Nextcloud!");
+        showToast("Vault successfully merged and uploaded to Nextcloud!");
       } else {
         setSyncStatus("Error");
-        setAlertDialog({ message: `Failed to upload to Nextcloud. Server responded with status: ${response.status}` });
+        let bodyText = "";
+        try { bodyText = await response.text(); } catch(e){}
+        setAlertDialog({ message: `Failed to upload. Status: ${response.status} ${response.statusText}\nDetail: ${bodyText.substring(0, 150)}` });
       }
     } catch (err) {
       setSyncStatus("Error");
-      setAlertDialog({ message: `Sync connection error: ${err.message}` });
+      setAlertDialog({ message: `Sync connection error: ${err.name} - ${err.message}\nMake sure your WebDAV URL is exact (e.g. https://server.com/remote.php/webdav/) and your App Password is correct.` });
     }
   };
 
@@ -981,11 +1110,13 @@ export default function App() {
         setAlertDialog({ message: "No remote backup file found on Nextcloud yet. Push your local data first." });
       } else {
         setSyncStatus("Error");
-        setAlertDialog({ message: `Failed to download from Nextcloud. Server status: ${response.status}` });
+        let bodyText = "";
+        try { bodyText = await response.text(); } catch(e){}
+        setAlertDialog({ message: `Failed to download. Status: ${response.status} ${response.statusText}\nDetail: ${bodyText.substring(0, 150)}` });
       }
     } catch (err) {
       setSyncStatus("Error");
-      setAlertDialog({ message: `Sync connection error: ${err.message}` });
+      setAlertDialog({ message: `Sync connection error: ${err.name} - ${err.message}\nMake sure your WebDAV URL is exact (e.g. https://server.com/remote.php/webdav/) and your App Password is correct.` });
     }
   };
 
@@ -1103,6 +1234,7 @@ export default function App() {
         setTopics([]);
         setUnsortedResources([]);
         setRecentlyViewed([]);
+        setDeletedItems([]);
         setActiveTopicId(null);
         setSettingsModalOpen(false);
         showToast("Vault cleared completely.");
@@ -1149,6 +1281,10 @@ export default function App() {
     setConfirmDialog({
       message: "Are you sure you want to delete this topic and all its contents?",
       onConfirm: () => {
+        const target = topics.find((t) => t.id === id);
+        if (target) {
+          setDeletedItems(prev => [...prev, { id: target.id, type: "Topic", title: target.name, deletedAt: new Date().toISOString() }]);
+        }
         const remaining = topics.filter((t) => t.id !== id);
         setTopics(remaining);
         if (activeTopicId === id && remaining.length > 0) {
@@ -1281,13 +1417,14 @@ export default function App() {
       message: "Are you sure you want to delete this resource?",
       onConfirm: () => {
         let targetUrl = "";
+        let resTitle = "Resource";
         if (activeView === "unsorted") {
           const res = unsortedResources.find((r) => r.id === resourceId);
-          if (res) targetUrl = res.url;
+          if (res) { targetUrl = res.url; resTitle = res.title; }
           setUnsortedResources((prev) => prev.filter((r) => r.id !== resourceId));
         } else {
           const res = activeTopic?.resources?.find((r) => r.id === resourceId);
-          if (res) targetUrl = res.url;
+          if (res) { targetUrl = res.url; resTitle = res.title; }
           setTopics((prev) =>
             prev.map((t) => {
               if (t.id !== activeTopicId) return t;
@@ -1295,6 +1432,7 @@ export default function App() {
             })
           );
         }
+        setDeletedItems(prev => [...prev, { id: resourceId, type: "Resource", title: resTitle, deletedAt: new Date().toISOString() }]);
         if (targetUrl) cleanAttachmentIfDb(targetUrl);
         showToast("Resource deleted");
       }
@@ -1465,6 +1603,12 @@ export default function App() {
     setConfirmDialog({
       message: "Are you sure you want to delete this source? This will remove its bibliography card.",
       onConfirm: () => {
+        let sourceTitle = "Source";
+        if (activeTopic) {
+          const src = activeTopic.sources.find(s => s.id === sourceId);
+          if (src) sourceTitle = src.title;
+        }
+        setDeletedItems(prev => [...prev, { id: sourceId, type: "Source", title: sourceTitle, deletedAt: new Date().toISOString() }]);
         setTopics((prev) =>
           prev.map((t) => {
             if (t.id !== activeTopicId) return t;
@@ -1680,6 +1824,7 @@ export default function App() {
     setConfirmDialog({
       message: "Are you sure you want to delete this note?",
       onConfirm: () => {
+        setDeletedItems(prev => [...prev, { id: noteId, type: "Note", title: "Note", deletedAt: new Date().toISOString() }]);
         setTopics((prev) =>
           prev.map((t) => {
             if (t.id !== activeTopicId) return t;
@@ -1715,6 +1860,12 @@ export default function App() {
     setConfirmDialog({
       message: "Are you sure you want to delete this discovery?",
       onConfirm: () => {
+        let discTitle = "Discovery";
+        if (activeTopic) {
+          const disc = activeTopic.discoveries.find(d => d.id === discId);
+          if (disc) discTitle = disc.title;
+        }
+        setDeletedItems(prev => [...prev, { id: discId, type: "Discovery", title: discTitle, deletedAt: new Date().toISOString() }]);
         setTopics((prev) =>
           prev.map((t) => {
             if (t.id !== activeTopicId) return t;
@@ -2015,7 +2166,11 @@ export default function App() {
                         onClick={() => {
                           if (item.topicId === "unsorted") { setActiveView("unsorted"); }
                           else { setActiveTopicId(item.topicId); setActiveView("topic"); setActiveTab(item.tab || "Overview"); }
-                          setSearchQuery(""); setSearchFocused(false); setMobileSearchOpen(false);
+                          setSearchQuery("");
+                          setSearchFocused(false);
+                          setMobileSearchOpen(false);
+                          setCaptureOpen(false);
+                          setSettingsModalOpen(false);
                         }}
                       >
                         <span className="search-item-title">{item.match}</span>
@@ -2049,34 +2204,62 @@ export default function App() {
       <nav className="mobile-bottom-nav">
         <button
           className={`mobile-nav-item ${activeView === "all-topics" ? "active" : ""}`}
-          onClick={() => { setActiveView("all-topics"); setMobileSidebarOpen(false); }}
+          onClick={() => {
+            setActiveView("all-topics");
+            setActiveTopicId(null);
+            setMobileSidebarOpen(false);
+            setCaptureOpen(false);
+            setSettingsModalOpen(false);
+          }}
         >
           <BookOpen size={20} />
           <span>Topics</span>
         </button>
         <button
           className={`mobile-nav-item ${activeView === "recently-viewed" ? "active" : ""}`}
-          onClick={() => { setActiveView("recently-viewed"); setMobileSidebarOpen(false); }}
+          onClick={() => {
+            setActiveView("recently-viewed");
+            setActiveTopicId(null);
+            setMobileSidebarOpen(false);
+            setCaptureOpen(false);
+            setSettingsModalOpen(false);
+          }}
         >
           <Clock size={20} />
           <span>Recent</span>
         </button>
         <button
           className="mobile-nav-item mobile-nav-capture"
-          onClick={() => { setCaptureMode("discovery"); setCaptureOpen(true); }}
+          onClick={() => {
+            setCaptureMode("discovery");
+            setCaptureOpen(true);
+            setSettingsModalOpen(false);
+            setMobileSidebarOpen(false);
+          }}
         >
           <Plus size={24} />
         </button>
         <button
           className={`mobile-nav-item ${activeView === "unsorted" ? "active" : ""}`}
-          onClick={() => { setActiveView("unsorted"); setMobileSidebarOpen(false); }}
+          onClick={() => {
+            setActiveView("unsorted");
+            setActiveTopicId(null);
+            setMobileSidebarOpen(false);
+            setCaptureOpen(false);
+            setSettingsModalOpen(false);
+          }}
         >
           <Database size={20} />
           <span>Unsorted</span>
         </button>
         <button
-          className="mobile-nav-item"
-          onClick={() => { setSettingsModalOpen(true); refreshStorageInfo(); }}
+          className={`mobile-nav-item ${settingsModalOpen ? "active" : ""}`}
+          onClick={() => {
+            setSettingsModalOpen(true);
+            setCaptureOpen(false);
+            setMobileSidebarOpen(false);
+            refreshStorageInfo();
+          }}
         >
           <Settings size={20} />
           <span>Settings</span>
@@ -2108,21 +2291,39 @@ export default function App() {
           <div className="sidebar-section-title">Library</div>
           <button
             className={`sidebar-item ${activeView === "all-topics" ? "active" : ""}`}
-            onClick={() => { setActiveView("all-topics"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+            onClick={() => {
+              setActiveView("all-topics");
+              setActiveTopicId(null);
+              setMobileSidebarOpen(false);
+              setCaptureOpen(false);
+              setSettingsModalOpen(false);
+            }}
           >
             <BookMarked size={15} />
             <span>All Topics</span>
           </button>
           <button
             className={`sidebar-item ${activeView === "unsorted" ? "active" : ""}`}
-            onClick={() => { setActiveView("unsorted"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+            onClick={() => {
+              setActiveView("unsorted");
+              setActiveTopicId(null);
+              setMobileSidebarOpen(false);
+              setCaptureOpen(false);
+              setSettingsModalOpen(false);
+            }}
           >
             <HelpCircle size={15} />
             <span>Unsorted</span>
           </button>
           <button
             className={`sidebar-item ${activeView === "recently-viewed" ? "active" : ""}`}
-            onClick={() => { setActiveView("recently-viewed"); setActiveTopicId(null); setMobileSidebarOpen(false); }}
+            onClick={() => {
+              setActiveView("recently-viewed");
+              setActiveTopicId(null);
+              setMobileSidebarOpen(false);
+              setCaptureOpen(false);
+              setSettingsModalOpen(false);
+            }}
           >
             <Eye size={15} />
             <span>Recently Viewed</span>
@@ -2211,6 +2412,8 @@ export default function App() {
                     setActiveView("topic");
                     setActiveTab("Overview");
                     setMobileSidebarOpen(false);
+                    setCaptureOpen(false);
+                    setSettingsModalOpen(false);
                   }}
                 >
                   <span className="sidebar-item-bullet" style={{ background: accentColor }} />
@@ -2299,6 +2502,8 @@ export default function App() {
                               }
                               setSearchQuery("");
                               setSearchFocused(false);
+                              setCaptureOpen(false);
+                              setSettingsModalOpen(false);
                             }}
                           >
                             <span className="search-item-title">{item.match}</span>
@@ -2433,7 +2638,13 @@ export default function App() {
                       key={t.id}
                       className="stat-card"
                       style={{ borderLeft: `4px solid ${ACCENTS[t.accent] || "#C9974D"}` }}
-                      onClick={() => { setActiveTopicId(t.id); setActiveView("topic"); setActiveTab("Overview"); }}
+                      onClick={() => {
+                        setActiveTopicId(t.id);
+                        setActiveView("topic");
+                        setActiveTab("Overview");
+                        setCaptureOpen(false);
+                        setSettingsModalOpen(false);
+                      }}
                     >
                       <h4 className="serif" style={{ fontSize: "18px", fontWeight: "600" }}>{t.name}</h4>
                       <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: "4px 0 12px" }}>{t.tagline}</p>
@@ -2582,6 +2793,8 @@ export default function App() {
                           }
                         }
                       }
+                      setCaptureOpen(false);
+                      setSettingsModalOpen(false);
                     }}
                   >
                     <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
@@ -3597,10 +3810,7 @@ export default function App() {
                 
                 <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
                   <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={syncToNextcloud} disabled={syncStatus === "Syncing"}>
-                    Push to Cloud
-                  </button>
-                  <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-brass)", color: "black" }} onClick={syncFromNextcloud} disabled={syncStatus === "Syncing"}>
-                    Pull from Cloud
+                    {syncStatus === "Syncing" ? "Syncing..." : "Smart Sync Vault"}
                   </button>
                 </div>
                 
@@ -3669,6 +3879,38 @@ export default function App() {
                   );
                 })() : (
                   <div style={{ fontSize: "12px", color: "var(--text-dim)" }}>Click Refresh to load storage details.</div>
+                )}
+              </div>
+
+              {/* Trashcan Management */}
+              <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px", marginBottom: "14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+                  <h4 style={{ fontSize: "13px", fontWeight: "600", margin: 0 }}>Trashcan (Tombstones)</h4>
+                  <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>{deletedItems.length} items</span>
+                </div>
+                {deletedItems.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                    <div style={{ maxHeight: "120px", overflowY: "auto", background: "rgba(255,255,255,0.03)", border: "1px solid var(--border-light)", borderRadius: "6px", padding: "8px", fontSize: "11px" }}>
+                      {deletedItems.map((item, idx) => (
+                        <div key={idx} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: idx < deletedItems.length - 1 ? "1px solid var(--border-light)" : "none" }}>
+                          <span style={{ color: "var(--text-primary)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginRight: "10px" }}>
+                            <strong style={{ color: "var(--text-dim)" }}>{item.type}:</strong> {item.title}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <button className="btn-solid" style={{ background: "var(--bg-panel)", border: "1px solid var(--border-color)", color: "var(--text-primary)", width: "100%", fontSize: "12px", padding: "6px" }} 
+                      onClick={() => {
+                        setConfirmDialog({
+                          message: "Are you sure you want to permanently empty the trash? Note: Emptying the trash removes the sync tombstones. If a remote device still has these files, they may reappear on your next sync.",
+                          onConfirm: () => setDeletedItems([])
+                        });
+                      }}>
+                      Empty Trashcan
+                    </button>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: "11px", color: "var(--text-dim)" }}>Trashcan is empty.</div>
                 )}
               </div>
 

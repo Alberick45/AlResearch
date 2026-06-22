@@ -2,5 +2,10 @@
   "appId": "com.researchvault.app",
   "appName": "Research Vault",
   "webDir": "dist",
-  "bundledWebRuntime": false
+  "bundledWebRuntime": false,
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
 }
