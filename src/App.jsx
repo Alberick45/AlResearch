@@ -831,6 +831,72 @@ export default function App() {
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  
+  const currentItem = ringItems[activeRingIndex];
+  const isTopicSelected = currentItem && currentItem.type === "topic";
+  const [radialContextMenu, setRadialContextMenu] = useState({ visible: false, x: 0, y: 0, topicId: null, topicName: "" });
+
+  useEffect(() => {
+    const handleGlobalClick = () => {
+      if (radialContextMenu.visible) {
+        setRadialContextMenu({ visible: false, x: 0, y: 0, topicId: null, topicName: "" });
+      }
+    };
+    window.addEventListener("click", handleGlobalClick);
+    window.addEventListener("contextmenu", handleGlobalClick);
+    return () => {
+      window.removeEventListener("click", handleGlobalClick);
+      window.removeEventListener("contextmenu", handleGlobalClick);
+    };
+  }, [radialContextMenu]);
+
+  const handleRadialContextMenu = (e) => {
+    if (!isTopicSelected) return;
+    e.preventDefault();
+    setRadialContextMenu({
+      visible: true,
+      x: e.clientX,
+      y: e.clientY,
+      topicId: currentItem.id,
+      topicName: currentItem.label
+    });
+  };
+
+  const longPressTimer = useRef(null);
+  const touchStartPos = useRef({ x: 0, y: 0 });
+
+  const handleTouchStartRadial = (e) => {
+    if (!isTopicSelected) return;
+    const touch = e.touches[0];
+    touchStartPos.current = { x: touch.clientX, y: touch.clientY };
+    longPressTimer.current = setTimeout(() => {
+      setRadialContextMenu({
+        visible: true,
+        x: touch.clientX,
+        y: touch.clientY,
+        topicId: currentItem.id,
+        topicName: currentItem.label
+      });
+    }, 600);
+  };
+
+  const handleTouchMoveRadial = (e) => {
+    if (!longPressTimer.current) return;
+    const touch = e.touches[0];
+    const dx = Math.abs(touch.clientX - touchStartPos.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPos.current.y);
+    if (dx > 10 || dy > 10) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const handleTouchEndRadial = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
   const [settingsTab, setSettingsTab] = useState("profile"); // 'profile' | 'sync' | 'storage'
   const [helpModalOpen, setHelpModalOpen] = useState(false);
   const [storageInfo, setStorageInfo] = useState(null); // { usage, quota, percent, lsUsed }
@@ -1575,10 +1641,12 @@ export default function App() {
         if (target) {
           setDeletedItems(prev => [...prev, { id: target.id, type: "Topic", title: target.name, deletedAt: new Date().toISOString() }]);
         }
+        const origIdx = topics.findIndex((t) => t.id === id);
         const remaining = topics.filter((t) => t.id !== id);
         setTopics(remaining);
         if (activeTopicId === id && remaining.length > 0) {
-          setActiveTopicId(remaining[0].id);
+          const nextActiveTopic = origIdx < remaining.length ? remaining[origIdx] : remaining[remaining.length - 1];
+          setActiveTopicId(nextActiveTopic.id);
           setActiveView("topic");
         } else if (remaining.length === 0) {
           setActiveTopicId(null);
@@ -3529,8 +3597,14 @@ export default function App() {
           {/* The active selector spotlight */}
           <div className="radial-spotlight" />
 
-          {/* Center label & instructions */}
-          <div className="radial-center-panel">
+          <div 
+            className="radial-center-panel"
+            onContextMenu={handleRadialContextMenu}
+            onTouchStart={handleTouchStartRadial}
+            onTouchMove={handleTouchMoveRadial}
+            onTouchEnd={handleTouchEndRadial}
+            style={{ cursor: isTopicSelected ? 'context-menu' : 'default' }}
+          >
             <ThreeHead 
               lookAngle={((hoveredRingIndex !== null ? hoveredRingIndex : activeRingIndex) - activeRingIndex) * 22} 
               activeIconType={ringItems[hoveredRingIndex !== null ? hoveredRingIndex : activeRingIndex]?.id}
@@ -4525,6 +4599,27 @@ export default function App() {
               </div>
             </div>
           </div>
+        </div>
+      )}      {/* Radial Context Menu */}
+      {radialContextMenu.visible && (
+        <div 
+          className="radial-context-menu" 
+          style={{ 
+            top: radialContextMenu.y, 
+            left: radialContextMenu.x 
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button 
+            className="radial-context-menu-item" 
+            onClick={() => {
+              deleteTopic(radialContextMenu.topicId);
+              setRadialContextMenu({ visible: false, x: 0, y: 0, topicId: null, topicName: "" });
+            }}
+          >
+            <Trash2 size={14} />
+            <span>Delete {radialContextMenu.topicName}</span>
+          </button>
         </div>
       )}
 
