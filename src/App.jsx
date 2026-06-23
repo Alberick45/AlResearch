@@ -6,6 +6,7 @@ import {
   Settings, Bell, Edit3, Trash2, Shield, Eye, Database, FileUp, FileDown, Info,
   Unlock, UserPlus, LogOut, Key, User, BookOpen, Clock, Video, Mic, Users
 } from "lucide-react";
+import ThreeHead from "./ThreeHead";
 
 /* ------------------------------------------------------------------ */
 /* Accent Map & Constants                                              */
@@ -145,6 +146,7 @@ const sanitizeAndMigrateTopics = (rawTopics) => {
       return { ...topic, id: newId };
     }
     seenIds.add(topic.id);
+    return topic;
   });
 };
 
@@ -559,6 +561,7 @@ export default function App() {
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
   const recordingTimerRef = useRef(null);
+  const lastTabScrollRef = useRef(0);
 
   const startAudioRecording = async () => {
     try {
@@ -621,12 +624,14 @@ export default function App() {
   };
 
   // Layout Collapsible & Mobile States
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [bookMenuOpen, setBookMenuOpen] = useState(false);
   const [secondaryCollapsed, setSecondaryCollapsed] = useState(false);
   const [aboutCollapsed, setAboutCollapsed] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileSecondaryOpen, setMobileSecondaryOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+
+
 
   // Theme Toggling State
   const [theme, setTheme] = useState(() => localStorage.getItem("rkv_theme") || "dark");
@@ -686,6 +691,141 @@ export default function App() {
     }
     return [];
   });
+
+  const [activeRingIndex, setActiveRingIndex] = useState(0);
+  const [hoveredRingIndex, setHoveredRingIndex] = useState(null);
+  const touchStartXRef = useRef(0);
+  const touchStartYRef = useRef(0);
+
+  const ringItems = [
+    { id: "all-topics", label: "All Topics", type: "system" },
+    { id: "unsorted", label: "Unsorted", type: "system" },
+    { id: "recently-viewed", label: "Recent", type: "system" },
+    ...topics.map((t) => ({ id: t.id, label: t.name, type: "topic", accent: t.accent }))
+  ];
+
+  // Sync activeRingIndex back to view states
+  useEffect(() => {
+    const target = ringItems[activeRingIndex];
+    if (target) {
+      if (target.type === "system") {
+        setActiveView(target.id);
+        setActiveTopicId(null);
+      } else {
+        setActiveTopicId(target.id);
+        setActiveView("topic");
+        setActiveTab("Overview");
+      }
+    }
+  }, [activeRingIndex]);
+
+  // Sync view changes from elsewhere back to activeRingIndex
+  useEffect(() => {
+    let targetIndex = 0;
+    if (activeView === "topic" && activeTopicId) {
+      const idx = topics.findIndex((t) => t.id === activeTopicId);
+      if (idx !== -1) {
+        targetIndex = 3 + idx;
+      }
+    } else if (activeView === "unsorted") {
+      targetIndex = 1;
+    } else if (activeView === "recently-viewed") {
+      targetIndex = 2;
+    } else {
+      targetIndex = 0;
+    }
+    if (activeRingIndex !== targetIndex && targetIndex < ringItems.length) {
+      setActiveRingIndex(targetIndex);
+    }
+  }, [activeView, activeTopicId, topics]);
+
+  // Global mouse wheel listener targeting bottom of viewport to rotate the dock
+  useEffect(() => {
+    const handleGlobalWheel = (e) => {
+      // Check if mouse cursor is within bottom 220px of window viewport
+      if (e.clientY > window.innerHeight - 220) {
+        e.preventDefault(); // prevent viewport scrolling
+        
+        const now = Date.now();
+        if (now - lastTabScrollRef.current < 200) return; // slightly faster scroll response (200ms)
+        
+        let direction = 0;
+        if (Math.abs(e.deltaX) > 10) {
+          direction = e.deltaX > 0 ? 1 : -1;
+        } else if (Math.abs(e.deltaY) > 12) {
+          direction = e.deltaY > 0 ? 1 : -1;
+        }
+        
+        if (direction !== 0) {
+          setActiveRingIndex((prev) => {
+            const nextIndex = prev + direction;
+            if (nextIndex >= 0 && nextIndex < ringItems.length) {
+              lastTabScrollRef.current = now;
+              return nextIndex;
+            }
+            return prev;
+          });
+        }
+      }
+    };
+    
+    window.addEventListener("wheel", handleGlobalWheel, { passive: false });
+    return () => {
+      window.removeEventListener("wheel", handleGlobalWheel);
+    };
+  }, [ringItems.length]);
+
+  const handleRingWheel = (e) => {
+    // Keep as fallback for inline onWheel
+    const now = Date.now();
+    if (now - lastTabScrollRef.current < 200) return;
+    
+    let direction = 0;
+    if (Math.abs(e.deltaX) > 10) {
+      direction = e.deltaX > 0 ? 1 : -1;
+    } else if (Math.abs(e.deltaY) > 12) {
+      direction = e.deltaY > 0 ? 1 : -1;
+    }
+    
+    if (direction !== 0) {
+      const nextIndex = activeRingIndex + direction;
+      if (nextIndex >= 0 && nextIndex < ringItems.length) {
+        setActiveRingIndex(nextIndex);
+        lastTabScrollRef.current = now;
+      }
+    }
+  };
+
+  const handleTouchStart = (e) => {
+    if (e.touches && e.touches[0]) {
+      touchStartXRef.current = e.touches[0].clientX;
+      touchStartYRef.current = e.touches[0].clientY;
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (!e.touches || !e.touches[0]) return;
+    const currentX = e.touches[0].clientX;
+    const currentY = e.touches[0].clientY;
+    
+    const deltaX = currentX - touchStartXRef.current;
+    const deltaY = currentY - touchStartYRef.current;
+    
+    const now = Date.now();
+    if (now - lastTabScrollRef.current < 300) return;
+    
+    const threshold = 40;
+    if (Math.abs(deltaX) > threshold) {
+      const direction = deltaX > 0 ? -1 : 1;
+      const nextIndex = activeRingIndex + direction;
+      if (nextIndex >= 0 && nextIndex < ringItems.length) {
+        setActiveRingIndex(nextIndex);
+        lastTabScrollRef.current = now;
+        touchStartXRef.current = currentX;
+        touchStartYRef.current = currentY;
+      }
+    }
+  };
 
   // UI Dropdowns & Modals
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
@@ -2258,23 +2398,46 @@ export default function App() {
 
       {/* ── MOBILE HEADER ──────────────────────────────────────────── */}
       <div className="mobile-topbar">
-        <button className="mobile-header-btn" onClick={() => { setMobileSidebarOpen(!mobileSidebarOpen); }} title="Menu">
-          <BookOpen size={20} />
-        </button>
+        <div className="book-menu-wrapper" style={{ position: 'relative' }}>
+          <button 
+            className="mobile-header-btn" 
+            onClick={() => setBookMenuOpen(!bookMenuOpen)} 
+            title="Menu"
+            style={{ color: bookMenuOpen ? "var(--accent-brass)" : "inherit" }}
+          >
+            <BookOpen size={20} />
+          </button>
+          {bookMenuOpen && (
+            <div className="profile-dropdown-menu" style={{ left: 0, right: 'auto', top: '40px', zIndex: 100 }}>
+              <div className="profile-menu-header">
+                <div className="profile-menu-name">Vault Options</div>
+                <div className="profile-menu-sub">{currentUser}'s Workspace</div>
+              </div>
+              <button className="profile-menu-item" onClick={() => { setBookMenuOpen(false); setSettingsModalOpen(true); refreshStorageInfo(); }}>
+                <Settings size={14} />
+                <span>Vault Settings</span>
+              </button>
+              <button className="profile-menu-item" onClick={() => { setBookMenuOpen(false); setHelpModalOpen(true); }}>
+                <HelpCircle size={14} />
+                <span>Documentation</span>
+              </button>
+              <button className="profile-menu-item logout" onClick={handleLogout}>
+                <LogOut size={14} />
+                <span>Lock Vault</span>
+              </button>
+            </div>
+          )}
+        </div>
         <span className="mobile-topbar-title serif">
           {activeView === "topic" && activeTopic ? activeTopic.name : "Research Vault"}
         </span>
         <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <button className="mobile-header-btn" onClick={() => { setCaptureMode("discovery"); setCaptureOpen(true); setSettingsModalOpen(false); setMobileSidebarOpen(false); }} title="New Capture">
+            <Plus size={20} />
+          </button>
           <button className="mobile-header-btn" onClick={() => setMobileSearchOpen(true)} title="Search">
             <Search size={18} />
           </button>
-          <div
-            className="user-profile-avatar"
-            style={{ width: 30, height: 30, fontSize: "12px", cursor: "pointer" }}
-            onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}
-          >
-            {currentUser?.charAt(0).toUpperCase()}
-          </div>
         </div>
       </div>
 
@@ -2350,267 +2513,11 @@ export default function App() {
         <div className="drawer-overlay" style={{ zIndex: 48 }} onClick={() => setMobileSidebarOpen(false)} />
       )}
 
-      {/* ── MOBILE BOTTOM NAV ──────────────────────────────────────── */}
-      <nav className="mobile-bottom-nav">
-        <button
-          className={`mobile-nav-item ${activeView === "all-topics" ? "active" : ""}`}
-          onClick={() => {
-            setActiveView("all-topics");
-            setActiveTopicId(null);
-            setMobileSidebarOpen(false);
-            setCaptureOpen(false);
-            setSettingsModalOpen(false);
-          }}
-        >
-          <BookOpen size={20} />
-          <span>Topics</span>
-        </button>
-        <button
-          className={`mobile-nav-item ${activeView === "recently-viewed" ? "active" : ""}`}
-          onClick={() => {
-            setActiveView("recently-viewed");
-            setActiveTopicId(null);
-            setMobileSidebarOpen(false);
-            setCaptureOpen(false);
-            setSettingsModalOpen(false);
-          }}
-        >
-          <Clock size={20} />
-          <span>Recent</span>
-        </button>
-        <button
-          className="mobile-nav-item mobile-nav-capture"
-          onClick={() => {
-            setCaptureMode("discovery");
-            setCaptureOpen(true);
-            setSettingsModalOpen(false);
-            setMobileSidebarOpen(false);
-          }}
-        >
-          <Plus size={24} />
-        </button>
-        <button
-          className={`mobile-nav-item ${activeView === "unsorted" ? "active" : ""}`}
-          onClick={() => {
-            setActiveView("unsorted");
-            setActiveTopicId(null);
-            setMobileSidebarOpen(false);
-            setCaptureOpen(false);
-            setSettingsModalOpen(false);
-          }}
-        >
-          <Database size={20} />
-          <span>Unsorted</span>
-        </button>
-        <button
-          className={`mobile-nav-item ${settingsModalOpen ? "active" : ""}`}
-          onClick={() => {
-            setSettingsModalOpen(true);
-            setCaptureOpen(false);
-            setMobileSidebarOpen(false);
-            refreshStorageInfo();
-          }}
-        >
-          <Settings size={20} />
-          <span>Settings</span>
-        </button>
-      </nav>
-
-      {/* 1. SIDEBAR PANEL */}
-      <aside className={`sidebar ${sidebarCollapsed ? "collapsed" : ""} ${mobileSidebarOpen ? "mobile-open" : ""}`}>
-        <div className="sidebar-header">
-          <div className="sidebar-logo-row">
-            <span style={{ fontSize: "22px" }}>📂</span>
-            <h1 className="sidebar-title">Research Vault</h1>
-          </div>
-          <span className="sidebar-sub">knowledge compiler</span>
-        </div>
-
-        <div className="workspace-dropdown">
-          <button className="workspace-btn">
-            <span style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-              <Shield size={14} style={{ color: "#5E8577" }} />
-              <strong>{currentUser}'s Vault</strong>
-            </span>
-            <Lock size={12} style={{ color: "var(--text-dim)" }} />
-          </button>
-        </div>
-
-        {/* Library Navigation (static) */}
-        <div className="sidebar-nav-section" style={{ flexShrink: 0 }}>
-          <div className="sidebar-section-title">Library</div>
-          <button
-            className={`sidebar-item ${activeView === "all-topics" ? "active" : ""}`}
-            onClick={() => {
-              setActiveView("all-topics");
-              setActiveTopicId(null);
-              setMobileSidebarOpen(false);
-              setCaptureOpen(false);
-              setSettingsModalOpen(false);
-            }}
-          >
-            <BookMarked size={15} />
-            <span>All Topics</span>
-          </button>
-          <button
-            className={`sidebar-item ${activeView === "unsorted" ? "active" : ""}`}
-            onClick={() => {
-              setActiveView("unsorted");
-              setActiveTopicId(null);
-              setMobileSidebarOpen(false);
-              setCaptureOpen(false);
-              setSettingsModalOpen(false);
-            }}
-          >
-            <HelpCircle size={15} />
-            <span>Unsorted</span>
-          </button>
-          <button
-            className={`sidebar-item ${activeView === "recently-viewed" ? "active" : ""}`}
-            onClick={() => {
-              setActiveView("recently-viewed");
-              setActiveTopicId(null);
-              setMobileSidebarOpen(false);
-              setCaptureOpen(false);
-              setSettingsModalOpen(false);
-            }}
-          >
-            <Eye size={15} />
-            <span>Recently Viewed</span>
-          </button>
-        </div>
-
-        {/* Topics List (scrollable) */}
-        <div className="sidebar-nav-section" style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, overflow: "hidden" }}>
-          <div className="sidebar-section-title" style={{ flexShrink: 0 }}>
-            <span>Research Topics</span>
-            <button onClick={() => setAddingTopic(true)} title="Add new topic">
-              <Plus size={14} />
-            </button>
-          </div>
-
-          <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
-
-            {addingTopic && (
-              <div className="topic-input-wrapper-highlight" style={{ padding: "8px 20px" }}>
-                <div className="topic-input-guide-pulse">
-                  <span>🦉 Look here! Name your new topic:</span>
-                </div>
-                <input
-                  type="text"
-                  placeholder="Topic name..."
-                  autoFocus
-                  style={{
-                    width: "100%",
-                    padding: "6px 10px",
-                    background: "rgba(0,0,0,0.3)",
-                    border: "1px solid var(--border-color)",
-                    borderRadius: "4px",
-                    fontSize: "12px",
-                    color: "white"
-                  }}
-                  value={newTopicName}
-                  onChange={(e) => setNewTopicName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") createTopic();
-                    if (e.key === "Escape") setAddingTopic(false);
-                  }}
-                />
-                <div style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
-                  <button
-                    onClick={createTopic}
-                    style={{
-                      background: "var(--accent-brass)",
-                      color: "black",
-                      border: "none",
-                      padding: "3px 8px",
-                      fontSize: "11px",
-                      borderRadius: "3px",
-                      cursor: "pointer",
-                      fontWeight: "600"
-                    }}
-                  >
-                    Add
-                  </button>
-                  <button
-                    onClick={() => setAddingTopic(false)}
-                    style={{
-                      background: "transparent",
-                      border: "none",
-                      color: "var(--text-secondary)",
-                      padding: "3px 8px",
-                      fontSize: "11px",
-                      cursor: "pointer"
-                    }}
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {topics.map((t) => {
-              const active = activeView === "topic" && t.id === activeTopicId;
-              const accentColor = ACCENTS[t.accent] || "#C9974D";
-              return (
-                <button
-                  key={t.id}
-                  className={`sidebar-item ${active ? "active" : ""}`}
-                  style={{ "--accent-color": accentColor }}
-                  onClick={() => {
-                    setActiveTopicId(t.id);
-                    setActiveView("topic");
-                    setActiveTab("Overview");
-                    setMobileSidebarOpen(false);
-                    setCaptureOpen(false);
-                    setSettingsModalOpen(false);
-                  }}
-                >
-                  <span className="sidebar-item-bullet" style={{ background: accentColor }} />
-                  <span className="serif" style={{ fontSize: "14.5px", fontWeight: 500 }}>{t.name}</span>
-                  {t.starred && <Star size={11} fill="#C9974D" stroke="none" style={{ marginLeft: "auto" }} />}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="sidebar-footer">
-          {/* Backup Import Export */}
-          <div style={{ display: "flex", gap: "8px" }}>
-            <button className="desktop-app-btn" style={{ flex: 1 }} onClick={exportData} title="Export Vault Data">
-              <FileDown size={14} />
-              <span>Export</span>
-            </button>
-            <label className="desktop-app-btn" style={{ flex: 1, cursor: "pointer" }} title="Import Vault Data">
-              <FileUp size={14} />
-              <span>Import</span>
-              <input type="file" accept=".json" onChange={importData} style={{ display: "none" }} />
-            </label>
-          </div>
-
-          <button className="desktop-app-btn" onClick={handleLogout} style={{ color: "var(--accent-garnet)", borderColor: "rgba(166, 83, 61, 0.3)" }}>
-            <LogOut size={14} />
-            <span>Lock Vault</span>
-          </button>
-        </div>
-      </aside>
-
-
-
       {/* 3. MAIN WORKSPACE */}
       <main className="main-workspace">
         {/* Topbar */}
         <header className="topbar">
           <div className="topbar-left" style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <button 
-              className="column-collapse-btn" 
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              title={sidebarCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-            >
-              <BookOpen size={15} style={{ transform: sidebarCollapsed ? "none" : "scaleX(-1)" }} />
-            </button>
-
             <div className="search-container" style={{ flex: 1 }}>
               <div className="search-input-wrapper">
                 <Search size={15} className="search-input-icon" />
@@ -2709,37 +2616,33 @@ export default function App() {
               )}
             </div>
 
-            <button 
-              className="topbar-icon-btn" 
-              onClick={() => setAboutCollapsed(!aboutCollapsed)} 
-              title={aboutCollapsed ? "Show About Panel" : "Hide About Panel"}
-              style={{ color: aboutCollapsed ? "var(--text-dim)" : "var(--accent-brass)" }}
-            >
-              <Info size={16} />
-            </button>
-            <button className="topbar-icon-btn" onClick={() => setHelpModalOpen(true)} title="Help & Documentation">
-              <HelpCircle size={16} />
-            </button>
-            <button className="topbar-icon-btn" onClick={() => { setSettingsModalOpen(true); refreshStorageInfo(); }} title="Settings">
-              <Settings size={16} />
-            </button>
-
-            {/* Profile Dropdown Toggle */}
-            <div className="profile-dropdown-wrapper">
-              <div className="user-profile-avatar" title="Vault Profile Dropdown" onClick={() => setProfileDropdownOpen(!profileDropdownOpen)}>
-                {currentUser.slice(0, 2).toUpperCase()}
-              </div>
-              {profileDropdownOpen && (
-                <div className="profile-dropdown-menu">
+            {/* Book/Research Dropdown Menu */}
+            <div className="book-menu-wrapper" style={{ position: 'relative' }}>
+              <button 
+                className="topbar-icon-btn" 
+                onClick={() => setBookMenuOpen(!bookMenuOpen)}
+                title="Research actions menu"
+                style={{ color: bookMenuOpen ? "var(--accent-brass)" : "var(--text-dim)" }}
+              >
+                <BookOpen size={16} />
+              </button>
+              {bookMenuOpen && (
+                <div className="profile-dropdown-menu" style={{ right: 0, left: 'auto', top: '35px' }}>
                   <div className="profile-menu-header">
-                    <div className="profile-menu-name">Profile: {currentUser}</div>
-                    <div className="profile-menu-sub">Active Local Space</div>
+                    <div className="profile-menu-name">Vault Options</div>
+                    <div className="profile-menu-sub">{currentUser}'s Workspace</div>
                   </div>
-                  <button className="profile-menu-item" onClick={() => { setProfileDropdownOpen(false); setSettingsModalOpen(true); refreshStorageInfo(); }}>
+                  {activeView === "topic" && (
+                    <button className="profile-menu-item" onClick={() => { setBookMenuOpen(false); setAboutCollapsed(!aboutCollapsed); }}>
+                      <Info size={14} />
+                      <span>{aboutCollapsed ? "Show About Panel" : "Hide About Panel"}</span>
+                    </button>
+                  )}
+                  <button className="profile-menu-item" onClick={() => { setBookMenuOpen(false); setSettingsModalOpen(true); refreshStorageInfo(); }}>
                     <Settings size={14} />
                     <span>Vault Settings</span>
                   </button>
-                  <button className="profile-menu-item" onClick={() => { setProfileDropdownOpen(false); setHelpModalOpen(true); }}>
+                  <button className="profile-menu-item" onClick={() => { setBookMenuOpen(false); setHelpModalOpen(true); }}>
                     <HelpCircle size={14} />
                     <span>Documentation</span>
                   </button>
@@ -2751,67 +2654,55 @@ export default function App() {
               )}
             </div>
 
+
           </div>
         </header>
 
         {/* Workspace Body */}
         {activeView === "all-topics" && (
-          <div style={{ flex: 1, padding: "40px", overflowY: "auto" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "12px" }}>
-              <h2 className="serif" style={{ fontSize: "26px", margin: 0 }}>Research Topic Inventory</h2>
-            </div>
-            {topics.length === 0 ? (
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "60px", background: "rgba(255,255,255,0.02)", border: "1px dashed var(--border-color)", padding: "40px", borderRadius: "12px", maxWidth: "480px", margin: "60px auto 0" }}>
-                <div style={{ fontSize: "56px", marginBottom: "16px" }}>📂</div>
-                <h3 className="serif" style={{ fontSize: "20px", marginBottom: "8px" }}>Initialize Your Research</h3>
-                <p style={{ color: "var(--text-secondary)", textAlign: "center", maxWidth: "360px", marginBottom: "20px", fontSize: "13.5px" }}>
-                  Create your first Research Topic container to organize documents, note logs, and bibliography cards.
-                </p>
-                <button 
-                  className="btn-new-capture" 
-                  style={{ background: "var(--accent-brass)", color: "black" }} 
-                  onClick={() => {
-                    setSidebarCollapsed(false);
-                    setMobileSidebarOpen(true);
-                    setAddingTopic(true);
+          <div className="workspace-page" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '50vh', padding: '20px' }}>
+            {addingTopic ? (
+              <div className="add-topic-form-container" style={{ width: '100%', maxWidth: '400px', padding: '24px', background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: '12px', boxShadow: 'var(--shadow-xl)' }}>
+                <h3 className="serif" style={{ fontSize: '18px', marginBottom: '16px', color: 'var(--text-primary)' }}>Create New Research Topic</h3>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Topic name..."
+                  autoFocus
+                  value={newTopicName}
+                  onChange={(e) => setNewTopicName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { createTopic(); setAddingTopic(false); }
+                    if (e.key === "Escape") setAddingTopic(false);
                   }}
-                >
-                  <Plus size={16} />
-                  <span>Create First Topic</span>
-                </button>
+                  style={{ marginBottom: '16px', width: '100%' }}
+                />
+                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
+                  <button className="btn-solid" style={{ background: 'var(--accent-brass)', color: 'black', padding: '6px 12px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: '600' }} onClick={() => { createTopic(); setAddingTopic(false); }}>Create</button>
+                  <button className="btn-ghost" style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setAddingTopic(false)}>Cancel</button>
+                </div>
               </div>
             ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "16px" }}>
-                {topics.map((t) => {
-                  return (
-                    <div
-                      key={t.id}
-                      className="stat-card"
-                      style={{ borderLeft: `4px solid ${ACCENTS[t.accent] || "#C9974D"}` }}
-                      onClick={() => {
-                        setActiveTopicId(t.id);
-                        setActiveView("topic");
-                        setActiveTab("Overview");
-                        setCaptureOpen(false);
-                        setSettingsModalOpen(false);
-                      }}
-                    >
-                      <h4 className="serif" style={{ fontSize: "18px", fontWeight: "600" }}>{t.name}</h4>
-                      <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: "4px 0 12px" }}>{t.tagline}</p>
-                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--text-dim)", fontFamily: "var(--font-mono)" }}>
-                        <span>📄 {t.resources.length} resources</span>
-                        <span>💡 {t.discoveries.length} discoveries</span>
-                      </div>
-                    </div>
-                  );
-                })}
+              <div style={{ textAlign: 'center' }}>
+                <h2 className="serif" style={{ fontSize: '32px', marginBottom: '12px', color: 'var(--text-primary)' }}>Research Knowledge Vault</h2>
+                <p style={{ color: 'var(--text-secondary)', maxWidth: '480px', margin: '0 auto 30px', fontSize: '14px', lineHeight: '1.6' }}>
+                  Select an existing research topic from the radial scroller below, or initialize a new compiler environment.
+                </p>
+                <button
+                  className="btn-solid"
+                  style={{ background: 'var(--accent-brass)', color: 'black', padding: '10px 24px', fontSize: '14.5px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                  onClick={() => setAddingTopic(true)}
+                >
+                  <Plus size={16} />
+                  <span>Create New Topic</span>
+                </button>
               </div>
             )}
           </div>
         )}
 
         {activeView === "unsorted" && (
-          <div style={{ flex: 1, padding: "40px", overflowY: "auto" }}>
+          <div className="workspace-page">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "16px" }}>
               <div>
                 <h2 className="serif" style={{ fontSize: "26px", marginBottom: "4px" }}>Unsorted Inbox</h2>
@@ -2904,7 +2795,7 @@ export default function App() {
         )}
 
         {activeView === "recently-viewed" && (
-          <div style={{ flex: 1, padding: "40px", overflowY: "auto" }}>
+          <div className="workspace-page">
             <h2 className="serif" style={{ fontSize: "26px", marginBottom: "10px" }}>Recently Viewed</h2>
             <p style={{ color: "var(--text-secondary)", marginBottom: "20px", fontSize: "13.5px" }}>
               Quick links to your most recently accessed topic workspaces and resources.
@@ -3611,8 +3502,7 @@ export default function App() {
 
                 {/* Recent Notes Widget */}
                 <div className="recent-notes-widget">
-                  <h4 className="about-title" style={{ fontSize: "14px" }}>Recent Notes</h4>
-                  {activeTopic.notes.slice(0, 3).map((note) => (
+                              {activeTopic.notes.slice(0, 3).map((note) => (
                     <div key={note.id} className="recent-note-mini">
                       {note.text.length > 80 ? note.text.slice(0, 80) + "..." : note.text}
                     </div>
@@ -3625,6 +3515,83 @@ export default function App() {
             </aside>
           </div>
         )}
+
+        {/* 2.5 RADIAL DOCK NAVIGATION */}
+        <div 
+          className="radial-dock-container"
+          onWheel={handleRingWheel}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+        >
+          {/* Glow/Arc decoration */}
+          <div className="radial-arc-line" />
+          
+          {/* The active selector spotlight */}
+          <div className="radial-spotlight" />
+
+          {/* Center label & instructions */}
+          <div className="radial-center-panel">
+            <ThreeHead 
+              lookAngle={((hoveredRingIndex !== null ? hoveredRingIndex : activeRingIndex) - activeRingIndex) * 22} 
+              activeIconType={ringItems[hoveredRingIndex !== null ? hoveredRingIndex : activeRingIndex]?.id}
+              activeLabel={ringItems[hoveredRingIndex !== null ? hoveredRingIndex : activeRingIndex]?.label}
+            />
+            <div className="radial-center-label hide-on-mobile">Move your mouse to interact</div>
+            <div className="radial-center-sub hide-on-mobile">Scroll or swipe to explore</div>
+            <div className="radial-center-sub show-only-on-mobile">Swipe to explore</div>
+          </div>
+
+          {/* The Ring items */}
+          <div className="radial-ring">
+            {ringItems.map((item, index) => {
+              const isActive = index === activeRingIndex;
+              const distance = Math.abs(index - activeRingIndex);
+              
+              let IconComponent = BookOpen;
+              if (item.id === "all-topics") IconComponent = BookMarked;
+              else if (item.id === "unsorted") IconComponent = HelpCircle;
+              else if (item.id === "recently-viewed") IconComponent = Clock;
+
+              const angle = (index - activeRingIndex) * 22;
+              const accentColor = item.accent ? (ACCENTS[item.accent] || "var(--accent-brass)") : "var(--accent-brass)";
+
+              return (
+                <div
+                  key={item.id}
+                  className={`radial-item ${isActive ? "active" : ""}`}
+                  style={{
+                    transform: `translate(-50%, -50%) rotate(${angle}deg)`,
+                    opacity: distance > 5 ? 0 : 1,
+                    pointerEvents: distance > 5 ? "none" : "auto",
+                    "--item-accent": accentColor,
+                    zIndex: isActive ? 100 : 10
+                  }}
+                  onClick={() => setActiveRingIndex(index)}
+                  onMouseEnter={() => setHoveredRingIndex(index)}
+                  onMouseLeave={() => setHoveredRingIndex(null)}
+                >
+                  <div className="radial-connector-line" style={{ opacity: isActive ? 0.0 : 1.0 }} />
+                  <div className="radial-node-dot" style={{ opacity: isActive ? 0.0 : 1.0 }} />
+                  <div 
+                    className="radial-item-circle-wrapper"
+                    style={{
+                      transform: `translateY(calc(-1 * var(--radial-radius) - ${isActive ? "75px" : "45px"})) translateZ(${isActive ? "45px" : "-25px"}) scale(${isActive ? 1.25 : 0.92}) rotate(${-angle}deg)`,
+                      opacity: isActive ? 0.0 : 0.5,
+                      filter: isActive ? "none" : "blur(0.8px)",
+                      transition: "transform 0.6s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s, filter 0.4s",
+                      pointerEvents: isActive ? "none" : "auto"
+                    }}
+                  >
+                    <div className="radial-item-circle">
+                      <IconComponent size={isActive ? 22 : 18} />
+                    </div>
+                    <span className="radial-item-label">{item.label}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </main>
 
       {/* 5. QUICK CAPTURE DRAWER OVERLAY */}
@@ -3874,7 +3841,41 @@ export default function App() {
       {/* Settings Modal */}
       {settingsModalOpen && (
         <div className="modal-overlay" onClick={() => setSettingsModalOpen(false)}>
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+          <div 
+            className="modal-card" 
+            onClick={(e) => e.stopPropagation()}
+            onWheel={(e) => {
+              const now = Date.now();
+              if (now - lastTabScrollRef.current < 450) return;
+              
+              const isScrollableContainer = e.target.closest && (
+                e.target.closest('[style*="overflowY: auto"]') ||
+                e.target.closest('[style*="overflow-y: auto"]') ||
+                e.target.closest('[style*="overflow: auto"]')
+              );
+              if (isScrollableContainer && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+                return;
+              }
+              
+              const tabsOrder = ["profile", "sync", "storage"];
+              const currentIndex = tabsOrder.indexOf(settingsTab);
+              
+              let direction = 0;
+              if (Math.abs(e.deltaX) > 15) {
+                direction = e.deltaX > 0 ? 1 : -1;
+              } else if (Math.abs(e.deltaY) > 40) {
+                direction = e.deltaY > 0 ? 1 : -1;
+              }
+              
+              if (direction !== 0) {
+                const nextIndex = currentIndex + direction;
+                if (nextIndex >= 0 && nextIndex < tabsOrder.length) {
+                  setSettingsTab(tabsOrder[nextIndex]);
+                  lastTabScrollRef.current = now;
+                }
+              }
+            }}
+          >
             <div className="modal-header">
               <h3 className="modal-title">Vault Settings</h3>
               <button className="drawer-close-btn" onClick={() => setSettingsModalOpen(false)}>

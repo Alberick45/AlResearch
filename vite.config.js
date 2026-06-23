@@ -4,6 +4,11 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig({
   base: './',   // relative paths so Electron file:// protocol can find assets
+  server: {
+    watch: {
+      ignored: ['**/dist-desktop/**', '**/android/**']
+    }
+  },
   plugins: [
     react(),
     VitePWA({
