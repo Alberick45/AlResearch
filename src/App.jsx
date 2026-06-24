@@ -36,6 +36,7 @@ const TYPE_ICON = {
   Video: Video,
   Audio: Mic,
   Discussion: Users,
+  Discovery: Sparkles,
 };
 
 function fmtDate(iso) {
@@ -701,6 +702,7 @@ export default function App() {
     { id: "all-topics", label: "All Topics", type: "system" },
     { id: "unsorted", label: "Unsorted", type: "system" },
     { id: "recently-viewed", label: "Recent", type: "system" },
+    { id: "appendix", label: "Appendix", type: "system" },
     ...topics.map((t) => ({ id: t.id, label: t.name, type: "topic", accent: t.accent }))
   ];
 
@@ -725,12 +727,14 @@ export default function App() {
     if (activeView === "topic" && activeTopicId) {
       const idx = topics.findIndex((t) => t.id === activeTopicId);
       if (idx !== -1) {
-        targetIndex = 3 + idx;
+        targetIndex = 4 + idx;
       }
     } else if (activeView === "unsorted") {
       targetIndex = 1;
     } else if (activeView === "recently-viewed") {
       targetIndex = 2;
+    } else if (activeView === "appendix") {
+      targetIndex = 3;
     } else {
       targetIndex = 0;
     }
@@ -908,23 +912,19 @@ export default function App() {
   const [captureResTranscript, setCaptureResTranscript] = useState("");
   const [toast, setToast] = useState(null);
 
-  // Auto-close modals on navigation or Escape key
+  // Pagination / Load More states
+  const [visibleResourcesCount, setVisibleResourcesCount] = useState(15);
+  const [visibleNotesCount, setVisibleNotesCount] = useState(15);
+  const [visibleUnsortedCount, setVisibleUnsortedCount] = useState(15);
+
+  // Reset pagination when switching views or filters
   useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === "Escape") {
-        setSettingsModalOpen(false);
-        setHelpModalOpen(false);
-        setCaptureOpen(false);
-        setAlertDialog(null);
-        setConfirmDialog(null);
-        setEditingResource(null);
-        setEditingSource(null);
-        setEditingDiscovery(null);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+    setVisibleResourcesCount(15);
+    setVisibleNotesCount(15);
+    setVisibleUnsortedCount(15);
+  }, [activeTopicId, activeView, resourceFilter]);
+
+
 
   useEffect(() => {
     setSettingsModalOpen(false);
@@ -1013,6 +1013,7 @@ export default function App() {
   const [editingDiscovery, setEditingDiscovery] = useState(null); // null | { id, title, statement, verification, visibility }
   const [confirmDialog, setConfirmDialog] = useState(null); // null | { message, onConfirm }
   const [alertDialog, setAlertDialog] = useState(null); // null | { message }
+  const [tourStep, setTourStep] = useState(null);
 
   // Create Resource form inside active workspace
   const [addingResource, setAddingResource] = useState(false);
@@ -1062,12 +1063,18 @@ export default function App() {
         setActiveTopicId(null);
         setActiveView("all-topics");
       }
+
+      const tourCompleted = localStorage.getItem(`rkv_tour_completed_${currentUser}`);
+      if (!tourCompleted) {
+        setTourStep(1);
+      }
     } else {
       setTopics([]);
       setUnsortedResources([]);
       setRecentlyViewed([]);
       setActiveTopicId(null);
       setActiveView("all-topics");
+      setTourStep(null);
     }
   }, [currentUser]);
 
@@ -1798,6 +1805,19 @@ export default function App() {
   };
 
   const editResource = (resource) => {
+    if (resource.type === "Discovery") {
+      setEditingDiscovery({
+        id: resource.id,
+        title: resource.title,
+        statement: resource.statement || resource.title || "",
+        verification: resource.verification || "Unverified",
+        visibility: resource.visibility || "Private",
+        date: resource.date,
+        isUnsorted: true,
+      });
+      return;
+    }
+
     let sourceUrl = "";
     if (activeTopic) {
       const src = activeTopic.sources.find((s) => s.id === resource.sourceId);
@@ -2082,32 +2102,35 @@ export default function App() {
     if (type === "discovery") {
       const title = content.length > 40 ? content.slice(0, 40) + "..." : content;
       
-      if (topicTargetId === "unsorted") {
-        setAlertDialog({ message: "Discoveries must be filed under a specific Research Topic. Please choose a topic." });
-        return;
-      }
+      const disc = {
+        id: nextId("d"),
+        title,
+        type: "Discovery",
+        statement: content,
+        verification: "Unverified",
+        visibility: "Private",
+        relatedResources: [],
+        relatedNotes: [],
+        status: "Unread",
+        date: today,
+      };
 
-      setTopics((prev) =>
-        prev.map((t) => {
-          if (t.id !== topicTargetId) return t;
-          const disc = {
-            id: nextId("d"),
-            title,
-            statement: content,
-            verification: "Unverified",
-            visibility: "Private",
-            relatedResources: [],
-            relatedNotes: [],
-            date: today,
-          };
-          return {
-            ...t,
-            discoveries: [disc, ...t.discoveries],
-            timeline: [{ date: today, text: `Captured discovery: "${title}"` }, ...t.timeline],
-          };
-        })
-      );
-      showToast(`Captured discovery under topic`);
+      if (topicTargetId === "unsorted") {
+        setUnsortedResources((prev) => [disc, ...prev]);
+        showToast("Quick captured discovery to Unsorted");
+      } else {
+        setTopics((prev) =>
+          prev.map((t) => {
+            if (t.id !== topicTargetId) return t;
+            return {
+              ...t,
+              discoveries: [disc, ...t.discoveries],
+              timeline: [{ date: today, text: `Captured discovery: "${title}"` }, ...t.timeline],
+            };
+          })
+        );
+        showToast(`Captured discovery under topic`);
+      }
     } else {
       // Resource
       let title = manualTitle.trim() || content;
@@ -2242,22 +2265,32 @@ export default function App() {
     if (!editingDiscovery) return;
     const titleTrim = editingDiscovery.title.trim();
     if (!titleTrim) return;
+
+    if (editingDiscovery.isUnsorted) {
+      setUnsortedResources((prev) =>
+        prev.map((r) =>
+          r.id === editingDiscovery.id
+            ? {
+                ...r,
+                title: titleTrim,
+                statement: editingDiscovery.statement.trim(),
+                verification: editingDiscovery.verification,
+                visibility: editingDiscovery.visibility,
+              }
+            : r
+        )
+      );
+      setEditingDiscovery(null);
+      showToast("Discovery updated");
+      return;
+    }
+
     setTopics((prev) =>
       prev.map((t) => {
         if (t.id !== activeTopicId) return t;
         return {
           ...t,
-          discoveries: t.discoveries.map((d) =>
-            d.id === editingDiscovery.id
-              ? {
-                  ...d,
-                  title: titleTrim,
-                  statement: editingDiscovery.statement.trim(),
-                  verification: editingDiscovery.verification,
-                  visibility: editingDiscovery.visibility
-                }
-              : d
-          )
+          discoveries: d => d.id === editingDiscovery.id ? { ...d, title: titleTrim, statement: editingDiscovery.statement.trim(), verification: editingDiscovery.verification, visibility: editingDiscovery.visibility } : d
         };
       })
     );
@@ -2329,6 +2362,143 @@ export default function App() {
       }
     }
   });
+
+  // Enhanced keyboard shortcuts & Auto-close modals handler
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Escape - Close modals/drawers
+      if (e.key === "Escape") {
+        setSettingsModalOpen(false);
+        setHelpModalOpen(false);
+        setCaptureOpen(false);
+        setAlertDialog(null);
+        setConfirmDialog(null);
+        setEditingResource(null);
+        setEditingSource(null);
+        setEditingDiscovery(null);
+        setEditingNote(null);
+        setAddingTopic(false);
+        setAddingResource(false);
+        setConvertingNoteId(null);
+        setProfileDropdownOpen(false);
+        setNotificationsOpen(false);
+        setBookMenuOpen(false);
+      }
+
+      // Ctrl+Shift+T or Ctrl+Alt+T - Create New Topic
+      if ((e.ctrlKey || e.metaKey) && (e.shiftKey || e.altKey) && (e.key === "T" || e.key === "t")) {
+        e.preventDefault();
+        setActiveView("all-topics");
+        setActiveTopicId(null);
+        setAddingTopic(true);
+      }
+
+      // Ctrl+[1-6] - Switch Workspace Tab
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key >= "1" && e.key <= "6") {
+        e.preventDefault();
+        const tabIndex = parseInt(e.key) - 1;
+        if (tabIndex >= 0 && tabIndex < TABS.length) {
+          setActiveTab(TABS[tabIndex]);
+        }
+      }
+
+      // Ctrl+S - Save Active Form or Full Sync
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && (e.key === "S" || e.key === "s")) {
+        e.preventDefault();
+        
+        let saved = false;
+        if (editingResource) {
+          saveResourceEdit(
+            editingResource.id,
+            editingResource.title,
+            editingResource.type,
+            editingResource.sourceId,
+            editingResource.sourceUrl,
+            editingResource.topicId
+          );
+          saved = true;
+        } else if (editingSource) {
+          saveSourceEdit(editingSource.id, editingSource);
+          saved = true;
+        } else if (editingDiscovery) {
+          saveDiscoveryEdit();
+          saved = true;
+        } else if (editingNote) {
+          saveNoteEdit();
+          saved = true;
+        } else if (editingTopic) {
+          saveTopicEdit();
+          saved = true;
+        } else if (addingTopic) {
+          createTopic();
+          saved = true;
+        } else if (addingResource) {
+          addResourceDirect();
+          saved = true;
+        } else if (convertingNoteId) {
+          convertNoteToDiscovery(convertingNoteId);
+          saved = true;
+        } else if (captureOpen) {
+          const selectEl = document.getElementById("quick-capture-topic-select");
+          const topicVal = selectEl ? selectEl.value : "unsorted";
+          if (captureMode === "discovery") {
+            const textEl = document.getElementById("quick-capture-textarea");
+            if (textEl && textEl.value.trim()) {
+              quickCaptureSave(topicVal, "discovery", textEl.value.trim());
+              setCaptureOpen(false);
+              saved = true;
+            }
+          } else {
+            if (captureResType === "Discussion") {
+              if (captureResTranscript.trim()) {
+                const encoded = "data:text/plain;charset=utf-8," + encodeURIComponent(captureResTranscript);
+                quickCaptureSave(topicVal, "resource", encoded, captureResTitle || "Discussion Log", "Discussion");
+                setCaptureOpen(false);
+                saved = true;
+              } else {
+                setAlertDialog({ message: "Please paste your chat log before saving." });
+              }
+            } else {
+              quickCaptureSave(topicVal, "resource", captureResUrl, captureResTitle, captureResType);
+              setCaptureOpen(false);
+              saved = true;
+            }
+          }
+        }
+
+        if (!saved) {
+          // If no form is active, trigger full sync
+          syncToNextcloud();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    editingResource,
+    editingSource,
+    editingDiscovery,
+    editingNote,
+    editingTopic,
+    addingTopic,
+    addingResource,
+    convertingNoteId,
+    captureOpen,
+    captureMode,
+    captureResType,
+    captureResUrl,
+    captureResTitle,
+    captureResTranscript,
+    topics,
+    newTopicName,
+    newResourceTitle,
+    newResourceUrl,
+    newResourceType,
+    newNoteText,
+    convertTitle,
+    convertStatement
+  ]);
 
   /* ------------------------------------------------------------------ */
   /* Render Landing & Auth screen when not signed in                    */
@@ -2585,67 +2755,93 @@ export default function App() {
       <main className="main-workspace">
         {/* Topbar */}
         <header className="topbar">
-          <div className="topbar-left" style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-            <div className="search-container" style={{ flex: 1 }}>
-              <div className="search-input-wrapper">
-                <Search size={15} className="search-input-icon" />
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  placeholder="Search anything..."
-                  className="search-input-field"
-                  value={searchQuery}
-                  onChange={(e) => {
-                    setSearchQuery(e.target.value);
-                    setSearchFocused(true);
-                  }}
-                  onFocus={() => setSearchFocused(true)}
-                  onBlur={() => setTimeout(() => setSearchFocused(false), 200)}
-                />
-                <span className="search-shortcut">Ctrl K</span>
-              </div>
-
-              {/* Global Search Results Dropdown */}
-              {searchFocused && searchResults && (
-                <div className="search-results-dropdown">
-                  {Object.entries(searchResults).map(([section, items]) => {
-                    if (items.length === 0) return null;
-                    return (
-                      <div key={section} className="search-results-section">
-                        <div className="search-section-header">{section}</div>
-                        {items.map((item, idx) => (
-                          <button
-                            key={idx}
-                            className="search-result-item"
-                            onClick={() => {
-                              if (item.topicId === "unsorted") {
-                                setActiveView("unsorted");
-                              } else {
-                                setActiveTopicId(item.topicId);
-                                setActiveView("topic");
-                                setActiveTab(item.tab || "Overview");
-                              }
-                              setSearchQuery("");
-                              setSearchFocused(false);
-                              setCaptureOpen(false);
-                              setSettingsModalOpen(false);
-                            }}
-                          >
-                            <span className="search-item-title">{item.match}</span>
-                            <span className="search-item-topic">{item.name}</span>
-                          </button>
-                        ))}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+          <div className="topbar-left" style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+            <div className={`topbar-quick-nav ${tourStep === 3 ? "tour-spotlight-highlight" : ""}`}>
+              <button 
+                className={`topbar-nav-btn ${activeView === "unsorted" ? "active" : ""}`}
+                onClick={() => { setActiveView("unsorted"); setActiveTopicId(null); }}
+                title="Unsorted"
+              >
+                <HelpCircle size={14} />
+                <span>Unsorted</span>
+              </button>
+              <button 
+                className={`topbar-nav-btn ${activeView === "recently-viewed" ? "active" : ""}`}
+                onClick={() => { setActiveView("recently-viewed"); setActiveTopicId(null); }}
+                title="Recently Viewed"
+              >
+                <Clock size={14} />
+                <span>Recent</span>
+              </button>
+              <button 
+                className={`topbar-nav-btn ${activeView === "appendix" ? "active" : ""}`}
+                onClick={() => { setActiveView("appendix"); setActiveTopicId(null); }}
+                title="Appendix & Index"
+              >
+                <BookOpen size={14} />
+                <span>Appendix</span>
+              </button>
             </div>
+          </div>
+          <div className={`search-container ${tourStep === 2 ? "tour-spotlight-highlight" : ""}`}>
+            <div className="search-input-wrapper">
+              <Search size={15} className="search-input-icon" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                placeholder="Search anything..."
+                className="search-input-field"
+                value={searchQuery}
+                onChange={(e) => {
+                  setSearchQuery(e.target.value);
+                  setSearchFocused(true);
+                }}
+                onFocus={() => setSearchFocused(true)}
+                onBlur={() => setTimeout(() => setSearchFocused(false), 200)}
+              />
+              <span className="search-shortcut">Ctrl K</span>
+            </div>
+
+            {/* Global Search Results Dropdown */}
+            {searchFocused && searchResults && (
+              <div className="search-results-dropdown">
+                {Object.entries(searchResults).map(([section, items]) => {
+                  if (items.length === 0) return null;
+                  return (
+                    <div key={section} className="search-results-section">
+                      <div className="search-section-header">{section}</div>
+                      {items.map((item, idx) => (
+                        <button
+                          key={idx}
+                          className="search-result-item"
+                          onClick={() => {
+                            if (item.topicId === "unsorted") {
+                              setActiveView("unsorted");
+                            } else {
+                              setActiveTopicId(item.topicId);
+                              setActiveView("topic");
+                              setActiveTab(item.tab || "Overview");
+                            }
+                            setSearchQuery("");
+                            setSearchFocused(false);
+                            setCaptureOpen(false);
+                            setSettingsModalOpen(false);
+                          }}
+                        >
+                          <span className="search-item-title">{item.match}</span>
+                          <span className="search-item-topic">{item.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="topbar-right">
             <button
-              className="btn-new-capture"
+              className={`btn-new-capture ${tourStep === 4 ? "tour-spotlight-highlight" : ""}`}
               onClick={() => {
                 setCaptureMode("discovery");
                 setCaptureOpen(true);
@@ -2728,44 +2924,21 @@ export default function App() {
 
         {/* Workspace Body */}
         {activeView === "all-topics" && (
-          <div className="workspace-page" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '50vh', padding: '20px' }}>
-            {addingTopic ? (
-              <div className="add-topic-form-container" style={{ width: '100%', maxWidth: '400px', padding: '24px', background: 'var(--bg-panel)', border: '1px solid var(--border-color)', borderRadius: '12px', boxShadow: 'var(--shadow-xl)' }}>
-                <h3 className="serif" style={{ fontSize: '18px', marginBottom: '16px', color: 'var(--text-primary)' }}>Create New Research Topic</h3>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="Topic name..."
-                  autoFocus
-                  value={newTopicName}
-                  onChange={(e) => setNewTopicName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") { createTopic(); setAddingTopic(false); }
-                    if (e.key === "Escape") setAddingTopic(false);
-                  }}
-                  style={{ marginBottom: '16px', width: '100%' }}
-                />
-                <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                  <button className="btn-solid" style={{ background: 'var(--accent-brass)', color: 'black', padding: '6px 12px', borderRadius: '6px', border: 'none', cursor: 'pointer', fontWeight: '600' }} onClick={() => { createTopic(); setAddingTopic(false); }}>Create</button>
-                  <button className="btn-ghost" style={{ padding: '6px 12px', borderRadius: '6px', border: '1px solid var(--border-color)', background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer' }} onClick={() => setAddingTopic(false)}>Cancel</button>
-                </div>
-              </div>
-            ) : (
-              <div style={{ textAlign: 'center' }}>
-                <h2 className="serif" style={{ fontSize: '32px', marginBottom: '12px', color: 'var(--text-primary)' }}>Research Knowledge Vault</h2>
-                <p style={{ color: 'var(--text-secondary)', maxWidth: '480px', margin: '0 auto 30px', fontSize: '14px', lineHeight: '1.6' }}>
-                  Select an existing research topic from the radial scroller below, or initialize a new compiler environment.
-                </p>
-                <button
-                  className="btn-solid"
-                  style={{ background: 'var(--accent-brass)', color: 'black', padding: '10px 24px', fontSize: '14.5px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
-                  onClick={() => setAddingTopic(true)}
-                >
-                  <Plus size={16} />
-                  <span>Create New Topic</span>
-                </button>
-              </div>
-            )}
+          <div className={`workspace-page ${tourStep === 1 ? "tour-spotlight-highlight" : ""}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '40vh', padding: '20px', position: 'relative', zIndex: 5 }}>
+            <div style={{ textAlign: 'center' }}>
+              <h2 className="serif" style={{ fontSize: '32px', marginBottom: '12px', color: 'var(--text-primary)' }}>Research Knowledge Vault</h2>
+              <p style={{ color: 'var(--text-secondary)', maxWidth: '480px', margin: '0 auto 20px', fontSize: '14px', lineHeight: '1.6' }}>
+                Select an existing research topic from the radial scroller below, or initialize a new compiler environment.
+              </p>
+              <button
+                className="btn-solid"
+                style={{ background: 'var(--accent-brass)', color: 'black', padding: '10px 24px', fontSize: '14.5px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontWeight: '600', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                onClick={() => setAddingTopic(true)}
+              >
+                <Plus size={16} />
+                <span>Create New Topic</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -2773,7 +2946,7 @@ export default function App() {
           <div className="workspace-page">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "16px" }}>
               <div>
-                <h2 className="serif" style={{ fontSize: "26px", marginBottom: "4px" }}>Unsorted Inbox</h2>
+                <h2 className="serif" style={{ fontSize: "26px", marginBottom: "4px" }}>Unsorted</h2>
                 <p style={{ color: "var(--text-secondary)", fontSize: "13.5px", margin: 0 }}>
                   Contains quick resources pasted without an assigned topic container.
                 </p>
@@ -2801,62 +2974,75 @@ export default function App() {
               </div>
             ) : (
               <div className="resources-tab-list">
-                {unsortedResources
-                  .filter((r) => resourceFilter === "All" || r.status === resourceFilter)
-                  .map((r) => {
-                    const Icon = TYPE_ICON[r.type] || FileText;
-                    return (
-                      <div key={r.id} className="resource-detail-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "10px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", width: "100%" }}>
-                          <div className="resource-detail-left" style={{ cursor: "pointer" }} onClick={() => { editResource(r); addToRecentlyViewed(r.id, "resource", r.title, "Unsorted Inbox"); }}>
-                            <Icon size={18} className="resource-detail-icon" style={{ marginTop: "3px" }} />
-                            <div className="resource-detail-info">
-                              <h4 className="resource-detail-title">{r.title}</h4>
-                              <span className="resource-detail-meta">
-                                {r.type} • Unsorted Inbox
-                                {r.url && !r.url.startsWith("data:") && !r.url.startsWith("db://") && (
-                                  <>
-                                    {" • "}
-                                    <a 
-                                      href={r.url.startsWith("http") ? r.url : `https://${r.url}`} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
-                                      onClick={(e) => e.stopPropagation()}
-                                    >
-                                      Visit link <Link2 size={10} />
-                                    </a>
-                                  </>
-                                )}
-                              </span>
+                {(() => {
+                  const filtered = unsortedResources.filter((r) => resourceFilter === "All" || r.status === resourceFilter);
+                  return (
+                    <>
+                      {filtered.slice(0, visibleUnsortedCount).map((r) => {
+                        const Icon = TYPE_ICON[r.type] || FileText;
+                        return (
+                          <div key={r.id} className="resource-detail-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "10px" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", width: "100%" }}>
+                              <div className="resource-detail-left" style={{ cursor: "pointer" }} onClick={() => { editResource(r); addToRecentlyViewed(r.id, "resource", r.title, "Unsorted Inbox"); }}>
+                                <Icon size={18} className="resource-detail-icon" style={{ marginTop: "3px" }} />
+                                <div className="resource-detail-info">
+                                  <h4 className="resource-detail-title">{r.title}</h4>
+                                  <span className="resource-detail-meta">
+                                    {r.type} • Unsorted Inbox
+                                    {r.url && !r.url.startsWith("data:") && !r.url.startsWith("db://") && (
+                                      <>
+                                        {" • "}
+                                        <a 
+                                          href={r.url.startsWith("http") ? r.url : `https://${r.url}`} 
+                                          target="_blank" 
+                                          rel="noopener noreferrer" 
+                                          style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
+                                          onClick={(e) => e.stopPropagation()}
+                                        >
+                                          Visit link <Link2 size={10} />
+                                        </a>
+                                      </>
+                                    )}
+                                  </span>
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                                <button className={`status-pill status-${r.status.toLowerCase()}`} onClick={() => cycleStatus(r.id)}>
+                                  {r.status}
+                                </button>
+                                <button 
+                                  style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+                                  onClick={() => editResource(r)}
+                                  title="Edit resource title"
+                                >
+                                  <Edit3 size={14} />
+                                </button>
+                                <button 
+                                  style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
+                                  onClick={() => deleteResource(r.id)}
+                                  title="Delete resource"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </div>
                             </div>
+                            {r.url && (r.url.startsWith("data:") || r.url.startsWith("db://")) && (
+                              <OfflineAttachmentPreview url={r.url} title={r.title} type={r.type} />
+                            )}
                           </div>
-                          <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                            <button className={`status-pill status-${r.status.toLowerCase()}`} onClick={() => cycleStatus(r.id)}>
-                              {r.status}
-                            </button>
-                            <button 
-                              style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
-                              onClick={() => editResource(r)}
-                              title="Edit resource title"
-                            >
-                              <Edit3 size={14} />
-                            </button>
-                            <button 
-                              style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
-                              onClick={() => deleteResource(r.id)}
-                              title="Delete resource"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </div>
-                        {r.url && (r.url.startsWith("data:") || r.url.startsWith("db://")) && (
-                          <OfflineAttachmentPreview url={r.url} title={r.title} type={r.type} />
-                        )}
-                      </div>
-                    );
-                  })}
+                        );
+                      })}
+                      {filtered.length > visibleUnsortedCount && (
+                        <button 
+                          className="btn-load-more" 
+                          onClick={() => setVisibleUnsortedCount(prev => prev + 15)}
+                        >
+                          Load More Resources ({filtered.length - visibleUnsortedCount} remaining)
+                        </button>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             )}
           </div>
@@ -2920,6 +3106,157 @@ export default function App() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {activeView === "appendix" && (
+          <div className="workspace-page">
+            <h2 className="serif" style={{ fontSize: "26px", marginBottom: "10px" }}>Appendix & Index</h2>
+            <p style={{ color: "var(--text-secondary)", marginBottom: "20px", fontSize: "13.5px" }}>
+              A dictionary-style glossary index of all resources, discoveries, and sources compiled across all topics, sorted alphabetically.
+            </p>
+            {(() => {
+              // Aggregate all items
+              const appendixItems = [];
+              topics.forEach((t) => {
+                appendixItems.push({
+                  id: t.id,
+                  title: t.name,
+                  type: "Topic",
+                  detailType: t.tagline || "Topic Workspace",
+                  topicName: t.name,
+                  topicId: t.id,
+                  tab: "Overview",
+                });
+                t.resources.forEach((r) => {
+                  appendixItems.push({
+                    id: r.id,
+                    title: r.title,
+                    type: "Resource",
+                    detailType: r.type,
+                    topicName: t.name,
+                    topicId: t.id,
+                    tab: "Resources",
+                  });
+                });
+                t.discoveries.forEach((d) => {
+                  appendixItems.push({
+                    id: d.id,
+                    title: d.title,
+                    type: "Discovery",
+                    detailType: d.verification,
+                    topicName: t.name,
+                    topicId: t.id,
+                    tab: "Discoveries",
+                  });
+                });
+                t.sources.forEach((s) => {
+                  appendixItems.push({
+                    id: s.id,
+                    title: s.title,
+                    type: "Source",
+                    detailType: s.type,
+                    topicName: t.name,
+                    topicId: t.id,
+                    tab: "Sources",
+                  });
+                });
+              });
+
+              // Sort alphabetically
+              appendixItems.sort((a, b) => a.title.localeCompare(b.title));
+
+              if (appendixItems.length === 0) {
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "60px" }}>
+                    <BookOpen size={48} style={{ color: "var(--text-dim)", marginBottom: "14px" }} />
+                    <h3 className="serif" style={{ fontSize: "18px" }}>Appendix is empty</h3>
+                    <p style={{ color: "var(--text-dim)" }}>Start capturing resources, sources, or discoveries to generate indexes.</p>
+                  </div>
+                );
+              }
+
+              // Group by first letter
+              const groups = {};
+              appendixItems.forEach((item) => {
+                const firstChar = item.title.trim().charAt(0).toUpperCase();
+                const letter = /^[A-Z]$/.test(firstChar) ? firstChar : "#";
+                if (!groups[letter]) groups[letter] = [];
+                groups[letter].push(item);
+              });
+
+              const letters = Object.keys(groups).sort((a, b) => {
+                if (a === "#") return 1;
+                if (b === "#") return -1;
+                return a.localeCompare(b);
+              });
+
+              return (
+                <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+                  {/* A-Z jump bar */}
+                  <div className="appendix-az-jumpbar">
+                    {letters.map((l) => (
+                      <a
+                        key={l}
+                        href={`#appendix-sec-${l}`}
+                        className="az-jump-link"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          const el = document.getElementById(`appendix-sec-${l}`);
+                          if (el) el.scrollIntoView({ behavior: "smooth" });
+                        }}
+                      >
+                        {l}
+                      </a>
+                    ))}
+                  </div>
+
+                  {/* Dictionary sections */}
+                  <div className="appendix-sections" style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+                    {letters.map((l) => (
+                      <div key={l} id={`appendix-sec-${l}`} className="appendix-letter-section" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+                        <div className="appendix-letter-header">
+                          {l}
+                        </div>
+                        <div className="appendix-grid-container">
+                          {groups[l].map((item) => (
+                            <div
+                              key={item.id}
+                              className="appendix-item-card"
+                              onClick={() => {
+                                setActiveTopicId(item.topicId);
+                                setActiveView("topic");
+                                setActiveTab(item.tab);
+                                setCaptureOpen(false);
+                                setSettingsModalOpen(false);
+                                if (item.tab === "Resources") {
+                                  setActiveResourceId(item.id);
+                                }
+                              }}
+                            >
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "6px" }}>
+                                <span className={`appendix-badge badge-${item.type.toLowerCase()}`}>
+                                  {item.type}
+                                </span>
+                                <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                                  in <strong style={{ color: "var(--text-secondary)" }}>{item.topicName}</strong>
+                                </span>
+                              </div>
+                              <h4 className="appendix-item-title">
+                                {item.title}
+                              </h4>
+                              <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                                Type: {item.detailType}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -3162,77 +3499,89 @@ export default function App() {
                       </div>
                     ) : (
                       <div className="resources-tab-list">
-                        {activeTopic.resources
-                          .filter((r) => resourceFilter === "All" || r.status === resourceFilter)
-                          .map((r) => {
-                            const Icon = TYPE_ICON[r.type] || FileText;
-                            return (
-                              <div key={r.id} className="resource-detail-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "10px" }}>
-                                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", width: "100%" }}>
-                                  <div className="resource-detail-left" style={{ cursor: "pointer" }} onClick={() => addToRecentlyViewed(r.id, "resource", r.title, activeTopic.name)}>
-                                    <Icon size={18} className="resource-detail-icon" style={{ marginTop: "3px" }} />
-                                    <div className="resource-detail-info">
-                                      <h4 className="resource-detail-title">{r.title}</h4>
-                                      <span className="resource-detail-meta">
-                                        {r.type} • added {fmtDate(r.date)}
-                                        {(() => {
-                                          const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
-                                          if (resUrl && !resUrl.startsWith("data:") && !resUrl.startsWith("db://")) {
-                                            return (
-                                              <>
-                                                {" • "}
-                                                <a 
-                                                  href={resUrl.startsWith("http") ? resUrl : `https://${resUrl}`} 
-                                                  target="_blank" 
-                                                  rel="noopener noreferrer" 
-                                                  style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
-                                                  onClick={(e) => e.stopPropagation()}
-                                                >
-                                                  Visit link <Link2 size={10} />
-                                                </a>
-                                              </>
-                                            );
-                                          }
-                                          return null;
-                                        })()}
-                                      </span>
+                        {(() => {
+                          const filtered = activeTopic.resources.filter((r) => resourceFilter === "All" || r.status === resourceFilter);
+                          return (
+                            <>
+                              {filtered.slice(0, visibleResourcesCount).map((r) => {
+                                const Icon = TYPE_ICON[r.type] || FileText;
+                                return (
+                                  <div key={r.id} className="resource-detail-card" style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: "10px" }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", width: "100%" }}>
+                                      <div className="resource-detail-left" style={{ cursor: "pointer" }} onClick={() => addToRecentlyViewed(r.id, "resource", r.title, activeTopic.name)}>
+                                        <Icon size={18} className="resource-detail-icon" style={{ marginTop: "3px" }} />
+                                        <div className="resource-detail-info">
+                                          <h4 className="resource-detail-title">{r.title}</h4>
+                                          <span className="resource-detail-meta">
+                                            {r.type} • added {fmtDate(r.date)}
+                                            {(() => {
+                                              const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
+                                              if (resUrl && !resUrl.startsWith("data:") && !resUrl.startsWith("db://")) {
+                                                return (
+                                                  <>
+                                                    {" • "}
+                                                    <a 
+                                                      href={resUrl.startsWith("http") ? resUrl : `https://${resUrl}`} 
+                                                      target="_blank" 
+                                                      rel="noopener noreferrer" 
+                                                      style={{ color: "var(--accent-brass)", textDecoration: "underline", display: "inline-flex", alignItems: "center", gap: "2px", marginLeft: "4px" }}
+                                                      onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                      Visit link <Link2 size={10} />
+                                                    </a>
+                                                  </>
+                                                );
+                                              }
+                                              return null;
+                                            })()}
+                                          </span>
+                                        </div>
+                                      </div>
+                                      
+                                      <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                                         <button
+                                           className={`status-pill status-${r.status.toLowerCase()}`}
+                                           onClick={() => cycleStatus(r.id)}
+                                         >
+                                           {r.status}
+                                         </button>
+                                         <button 
+                                           style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
+                                           onClick={() => editResource(r)}
+                                           title="Edit resource title"
+                                         >
+                                           <Edit3 size={14} />
+                                         </button>
+                                         <button 
+                                           style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
+                                           onClick={() => deleteResource(r.id)}
+                                           title="Delete resource"
+                                         >
+                                           <Trash2 size={14} />
+                                         </button>
+                                       </div>
                                     </div>
+                                    {(() => {
+                                      const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
+                                      if (resUrl && (resUrl.startsWith("data:") || resUrl.startsWith("db://"))) {
+                                        return <OfflineAttachmentPreview url={resUrl} title={r.title} type={r.type} />;
+                                      }
+                                      return null;
+                                    })()}
                                   </div>
-                                  
-                                  <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                                     <button
-                                       className={`status-pill status-${r.status.toLowerCase()}`}
-                                       onClick={() => cycleStatus(r.id)}
-                                     >
-                                       {r.status}
-                                     </button>
-                                     <button 
-                                       style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
-                                       onClick={() => editResource(r)}
-                                       title="Edit resource title"
-                                     >
-                                       <Edit3 size={14} />
-                                     </button>
-                                     <button 
-                                       style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
-                                       onClick={() => deleteResource(r.id)}
-                                       title="Delete resource"
-                                     >
-                                       <Trash2 size={14} />
-                                     </button>
-                                   </div>
-                                </div>
-                                {(() => {
-                                  const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
-                                  if (resUrl && (resUrl.startsWith("data:") || resUrl.startsWith("db://"))) {
-                                    return <OfflineAttachmentPreview url={resUrl} title={r.title} type={r.type} />;
-                                  }
-                                  return null;
-                                })()}
-                              </div>
-                            );
-                          })
-                        }
+                                );
+                              })}
+                              {filtered.length > visibleResourcesCount && (
+                                <button 
+                                  className="btn-load-more" 
+                                  onClick={() => setVisibleResourcesCount(prev => prev + 15)}
+                                >
+                                  Load More Resources ({filtered.length - visibleResourcesCount} remaining)
+                                </button>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
@@ -3259,7 +3608,7 @@ export default function App() {
                     </div>
 
                     <div className="notes-grid">
-                      {activeTopic.notes.map((n) => (
+                      {activeTopic.notes.slice(0, visibleNotesCount).map((n) => (
                         <div key={n.id} className="note-card">
                           <div className="note-card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                              <span className="note-card-date">{fmtDate(n.date)}</span>
@@ -3291,7 +3640,7 @@ export default function App() {
                                <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
                                  <button className="btn-solid" style={{ background: "var(--accent-brass)", color: "black", padding: "2px 8px", fontSize: "11px" }} onClick={saveNoteEdit}>Save</button>
                                  <button className="btn-ghost" style={{ padding: "2px 8px", fontSize: "11px" }} onClick={() => setEditingNote(null)}>Cancel</button>
-                               </div>
+                                </div>
                              </div>
                            ) : (
                              <p className="note-card-text">{n.text}</p>
@@ -3348,6 +3697,17 @@ export default function App() {
                           )}
                         </div>
                       ))}
+                      {activeTopic.notes.length > visibleNotesCount && (
+                        <div style={{ gridColumn: "span 3", display: "flex", justifyContent: "center", marginTop: "12px" }}>
+                          <button 
+                            className="btn-load-more" 
+                            style={{ width: "100%" }}
+                            onClick={() => setVisibleNotesCount(prev => prev + 15)}
+                          >
+                            Load More Notes ({activeTopic.notes.length - visibleNotesCount} remaining)
+                          </button>
+                        </div>
+                      )}
 
                       {activeTopic.notes.length === 0 && (
                         <div className="empty-state" style={{ gridColumn: "span 3" }}>
@@ -3702,13 +4062,30 @@ export default function App() {
               <div className="form-group" style={{ marginTop: "10px" }}>
                 <label className="form-label" style={{ display: "flex", justifyContent: "space-between" }}>
                   <span>Destination Research Topic</span>
-                  <span style={{ color: "var(--accent-brass)", fontSize: "10.5px" }}>🦉 Tip: Use Unsorted if no topic exists yet</span>
+                  <span style={{ color: "var(--accent-brass)", fontSize: "10.5px" }}>
+                    {captureMode === "discovery"
+                      ? "🦉 Tip: Choose or create a specific Topic"
+                      : "🦉 Tip: Use Unsorted if no topic exists yet"}
+                  </span>
                 </label>
-                <select id="quick-capture-topic-select" className="form-input" defaultValue={activeTopicId || "unsorted"}>
+                <select
+                  id="quick-capture-topic-select"
+                  className="form-input"
+                  defaultValue={activeTopicId && activeTopicId !== "unsorted" ? activeTopicId : (topics[0]?.id || "unsorted")}
+                  onChange={(e) => {
+                    if (e.target.value === "new-topic") {
+                      setCaptureOpen(false);
+                      setActiveView("all-topics");
+                      setActiveTopicId(null);
+                      setAddingTopic(true);
+                    }
+                  }}
+                >
                   <option value="unsorted">Unsorted Inbox (No Topic)</option>
                   {topics.map((t) => (
                     <option key={t.id} value={t.id}>{t.name}</option>
                   ))}
+                  <option value="new-topic" style={{ color: "var(--accent-brass)", fontWeight: "bold" }}>+ Create New Topic...</option>
                 </select>
               </div>
 
@@ -4270,7 +4647,10 @@ export default function App() {
               <h4 style={{ fontWeight: "600", marginTop: "10px" }}>Keyboard Shortcuts</h4>
               <ul style={{ paddingLeft: "20px", color: "var(--text-secondary)" }}>
                 <li><strong style={{ color: "var(--text-primary)" }}>Ctrl + K</strong> / <strong style={{ color: "var(--text-primary)" }}>Cmd + K</strong>: Focus global search immediately.</li>
-                <li><strong style={{ color: "var(--text-primary)" }}>Escape</strong>: Close active quick capture drawers and dialog overlays.</li>
+                <li><strong style={{ color: "var(--text-primary)" }}>Escape</strong>: Close any active modal, drawer, dialog overlay, or dropdown.</li>
+                <li><strong style={{ color: "var(--text-primary)" }}>Ctrl + S</strong> / <strong style={{ color: "var(--text-primary)" }}>Cmd + S</strong>: Save active forms instantly; if no form is active, triggers a Nextcloud sync backup.</li>
+                <li><strong style={{ color: "var(--text-primary)" }}>Ctrl + [1-6]</strong>: Switch workspace tabs in the active topic (Overview, Resources, Notes, Discoveries, Sources, Timeline).</li>
+                <li><strong style={{ color: "var(--text-primary)" }}>Ctrl + Alt + T</strong> / <strong style={{ color: "var(--text-primary)" }}>Cmd + Alt + T</strong> (or Shift fallback): Create a new Topic workspace pop-up modal.</li>
               </ul>
 
               <h4 style={{ fontWeight: "600", marginTop: "10px" }}>How to import / export?</h4>
@@ -4600,6 +4980,47 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Create Topic Modal overlay */}
+      {addingTopic && (
+        <div className="modal-overlay" onClick={() => setAddingTopic(false)}>
+          <div className="modal-card" style={{ maxWidth: "400px" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title">Create New Research Topic</h3>
+              <button className="drawer-close-btn" onClick={() => setAddingTopic(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+              <div className="form-group">
+                <label className="form-label">Topic Name</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="Topic name..."
+                  autoFocus
+                  value={newTopicName}
+                  onChange={(e) => setNewTopicName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { createTopic(); setAddingTopic(false); }
+                    if (e.key === "Escape") setAddingTopic(false);
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "10px" }}>
+                <button className="btn-ghost" onClick={() => setAddingTopic(false)}>Cancel</button>
+                <button
+                  className="btn-solid"
+                  style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }}
+                  onClick={() => { createTopic(); setAddingTopic(false); }}
+                >
+                  Create Topic
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}      {/* Radial Context Menu */}
       {radialContextMenu.visible && (
         <div 
@@ -4620,6 +5041,93 @@ export default function App() {
             <Trash2 size={14} />
             <span>Delete {radialContextMenu.topicName}</span>
           </button>
+        </div>
+      )}
+
+      {/* 6. GUIDED TOUR CARD */}
+      {tourStep !== null && (
+        <div className="tour-card" onClick={(e) => e.stopPropagation()}>
+          <div className="tour-header">
+            <h4 className="tour-title">
+              <span>🤖 Vault Guide</span>
+            </h4>
+            <span className="tour-step-badge">Step {tourStep} of 5</span>
+          </div>
+          <div className="tour-body">
+            {tourStep === 1 && (
+              <p>
+                Welcome to the <strong>Research Knowledge Vault</strong>! This is an offline-first research environment where you can organize topics, links, and quick annotations. Select a topic using the 3D scroller menu or click <strong>Create New Topic</strong> to start a new environment.
+              </p>
+            )}
+            {tourStep === 2 && (
+              <p>
+                We've placed search center-stage! Click the search bar or press <kbd style={{ background: "rgba(255,255,255,0.1)", padding: "2px 4px", borderRadius: "4px" }}>Ctrl + K</kbd> to search topics, resources, notes, and discoveries instantly across your entire vault.
+              </p>
+            )}
+            {tourStep === 3 && (
+              <p>
+                Use the top navigation bar to access global, workspace-wide views:
+                <br />• <strong>Unsorted</strong>: View resources or discoveries captured without a topic.
+                <br />• <strong>Recent</strong>: Quickly access recently viewed topics.
+                <br />• <strong>Appendix</strong>: A dictionary-style glossary index of all compile contents.
+              </p>
+            )}
+            {tourStep === 4 && (
+              <p>
+                Click <strong>+ New</strong> to quick-capture a discovery statement or a resource URL. You can upload media/documents, record voice logs, or paste chat transcripts offline.
+              </p>
+            )}
+            {tourStep === 5 && (
+              <div>
+                <p style={{ marginBottom: "8px" }}>Supercharge your flow with these power-user keyboard shortcuts:</p>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 2fr", gap: "6px", fontSize: "12px", background: "rgba(0,0,0,0.2)", padding: "8px", borderRadius: "6px" }}>
+                  <strong style={{ color: "var(--accent-brass)" }}>Escape</strong> <span>Close modals/drawers</span>
+                  <strong style={{ color: "var(--accent-brass)" }}>Ctrl + S</strong> <span>Save form / Nextcloud sync</span>
+                  <strong style={{ color: "var(--accent-brass)" }}>Ctrl + [1-6]</strong> <span>Switch topic tabs</span>
+                  <strong style={{ color: "var(--accent-brass)" }}>Ctrl+Alt+T</strong> <span>Create new topic</span>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="tour-footer">
+            <button
+              className="btn-ghost"
+              style={{ fontSize: "12px", padding: "4px 8px" }}
+              onClick={() => {
+                localStorage.setItem(`rkv_tour_completed_${currentUser}`, "true");
+                setTourStep(null);
+                showToast("Tour skipped. Click Help in the profile menu to open guides.");
+              }}
+            >
+              Skip
+            </button>
+            <div style={{ display: "flex", gap: "8px" }}>
+              {tourStep > 1 && (
+                <button
+                  className="btn-ghost"
+                  style={{ fontSize: "12px", padding: "4px 12px" }}
+                  onClick={() => setTourStep(tourStep - 1)}
+                >
+                  Back
+                </button>
+              )}
+              <button
+                className="btn-solid"
+                style={{ background: "var(--accent-brass)", color: "black", fontSize: "12px", padding: "4px 16px", fontWeight: "600" }}
+                onClick={() => {
+                  if (tourStep < 5) {
+                    setTourStep(tourStep + 1);
+                  } else {
+                    localStorage.setItem(`rkv_tour_completed_${currentUser}`, "true");
+                    setTourStep(null);
+                    showToast("Tour completed! Enjoy your Vault.");
+                  }
+                }}
+              >
+                {tourStep === 5 ? "Finish" : "Next"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
