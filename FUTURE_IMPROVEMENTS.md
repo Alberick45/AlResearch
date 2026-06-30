@@ -180,6 +180,18 @@ try {
 
 ---
 
+### 2.9 Research Topic Reminders & Study Timers
+
+**What:** Ability to set custom daily or weekly timers and reminders for specific research topics (e.g., remind me to study "Webots Robotics" every day at 3:00 PM).
+
+**Plan:**
+- Add a `reminders: { time: string, days: number[], enabled: boolean }[]` field to topic structures.
+- Create a configuration panel inside the topic settings drawer.
+- Integrate browser-native **Push Notifications API** or Capacitor Notifications (for native mobile) to trigger alert banners.
+- When clicked, launch the app directly into the selected topic workspace.
+
+---
+
 ## 3. Medium-Term Features (3–6 months)
 
 ### 3.1 AI-Assisted Tagging and Summarization

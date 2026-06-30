@@ -24,10 +24,17 @@
     },
     "files": [
       "dist/**/*",
-      "main.cjs"
+      "main.cjs",
+      "preload.cjs"
     ],
     "win": {
-      "target": "portable"
+      "target": "portable",
+      "icon": "public/icon.png"
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity",
+      "icon": "public/icon.png"
     }
   },
   "dependencies": {

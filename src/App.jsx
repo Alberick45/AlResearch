@@ -347,7 +347,7 @@ const cleanAttachmentIfDb = async (url) => {
   }
 };
 
-function OfflineAttachmentPreview({ url, title, type }) {
+function OfflineAttachmentPreview({ url, title, type, currentUser }) {
   const [dataUrl, setDataUrl] = useState("");
 
   useEffect(() => {
@@ -459,22 +459,33 @@ function OfflineAttachmentPreview({ url, title, type }) {
             <div style={{ fontSize: "12px", color: "var(--text-dim)", textAlign: "center", padding: "12px" }}>
               No chat messages could be parsed. Make sure to paste format like: [23:07] Name: Message
             </div>
-          ) : (
-            messages.map((msg, index) => {
+          ) : (() => {
+            const uniqueSenders = [];
+            messages.forEach(m => {
+              const s = m.sender.toLowerCase();
+              if (!uniqueSenders.includes(s)) uniqueSenders.push(s);
+            });
+            
+            return messages.map((msg, index) => {
               const color = getSenderColor(msg.sender);
+              const isMe = msg.sender.toLowerCase() === currentUser?.toLowerCase();
+              const alignRight = isMe || (uniqueSenders.indexOf(msg.sender.toLowerCase()) === 1 && !uniqueSenders.includes(currentUser?.toLowerCase()));
+              
               return (
                 <div key={index} style={{ 
                   display: "flex", 
                   flexDirection: "column", 
-                  background: "var(--bg-panel)", 
+                  background: alignRight ? "var(--bg-panel-hover)" : "var(--bg-panel)", 
                   padding: "8px 12px", 
                   borderRadius: "8px", 
-                  borderLeft: `3px solid ${color}`,
-                  alignSelf: "flex-start",
-                  width: "100%",
+                  borderLeft: !alignRight ? `3px solid ${color}` : "none",
+                  borderRight: alignRight ? `3px solid ${color}` : "none",
+                  alignSelf: alignRight ? "flex-end" : "flex-start",
+                  width: "fit-content",
+                  maxWidth: "85%",
                   boxSizing: "border-box"
                 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: "4px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "16px", marginBottom: "4px" }}>
                     <span style={{ fontWeight: "600", color: color, fontSize: "12px" }}>
                       {msg.sender}
                     </span>
@@ -495,8 +506,8 @@ function OfflineAttachmentPreview({ url, title, type }) {
                   </div>
                 </div>
               );
-            })
-          )}
+            });
+          })()}
         </div>
       </div>
     );
@@ -608,7 +619,11 @@ export default function App() {
       showToast("Recording started...");
     } catch (err) {
       console.error("Failed to start recording:", err);
-      setAlertDialog({ message: "Could not access microphone. Please check permissions." });
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setAlertDialog({ message: "Microphone access was denied. Please allow microphone permissions in your browser settings to record audio notes." });
+      } else {
+        setAlertDialog({ message: `Could not access microphone: ${err.message || err.name}. Please check device connections and permissions.` });
+      }
     }
   };
 
@@ -967,6 +982,14 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
+  // Cloud Sync System States
+  const DEFAULT_GDRIVE_CLIENT_ID = "1096734181958-crf1u3l41tbqpvea205a2v3h60959fke.apps.googleusercontent.com";
+  const [syncProvider, setSyncProvider] = useState(() => localStorage.getItem("rkv_sync_provider") || "nextcloud");
+  const [gdriveToken, setGdriveToken] = useState(() => localStorage.getItem("rkv_gdrive_token") || "");
+  const [gdriveEmail, setGdriveEmail] = useState(() => localStorage.getItem("rkv_gdrive_email") || "");
+  const [gdriveClientId, setGdriveClientId] = useState(() => localStorage.getItem("rkv_gdrive_client_id") || "");
+  const [showAdvancedSync, setShowAdvancedSync] = useState(false);
+
   // Nextcloud WebDAV Sync States
   const [ncUrl, setNcUrl] = useState(() => localStorage.getItem("rkv_nc_url") || "");
   const [ncUser, setNcUser] = useState(() => localStorage.getItem("rkv_nc_user") || "");
@@ -974,6 +997,19 @@ export default function App() {
   const [ncPath, setNcPath] = useState(() => localStorage.getItem("rkv_nc_path") || "vault_backup.json");
   const [syncStatus, setSyncStatus] = useState("Idle");
   const [lastSync, setLastSync] = useState(() => localStorage.getItem("rkv_nc_last_sync") || "");
+
+  useEffect(() => {
+    localStorage.setItem("rkv_sync_provider", syncProvider);
+  }, [syncProvider]);
+  useEffect(() => {
+    localStorage.setItem("rkv_gdrive_token", gdriveToken);
+  }, [gdriveToken]);
+  useEffect(() => {
+    localStorage.setItem("rkv_gdrive_email", gdriveEmail);
+  }, [gdriveEmail]);
+  useEffect(() => {
+    localStorage.setItem("rkv_gdrive_client_id", gdriveClientId);
+  }, [gdriveClientId]);
 
   useEffect(() => {
     localStorage.setItem("rkv_nc_url", ncUrl);
@@ -1013,6 +1049,29 @@ export default function App() {
   const [editingDiscovery, setEditingDiscovery] = useState(null); // null | { id, title, statement, verification, visibility }
   const [confirmDialog, setConfirmDialog] = useState(null); // null | { message, onConfirm }
   const [alertDialog, setAlertDialog] = useState(null); // null | { message }
+  const [selectedNoteModal, setSelectedNoteModal] = useState(null); // null | Note
+  const [selectedDiscoveryModal, setSelectedDiscoveryModal] = useState(null); // null | Discovery
+  const [pacingActive, setPacingActive] = useState(false);
+  const [pacingTargetId, setPacingTargetId] = useState(null); // ID of the note or discovery
+  const [pacingSentences, setPacingSentences] = useState([]);
+  const [pacingCurrentIndex, setPacingCurrentIndex] = useState(0);
+  const [pacingIsPlaying, setPacingIsPlaying] = useState(false);
+  const [pacingTimeRemaining, setPacingTimeRemaining] = useState(0);
+  const [pacingTargetTime, setPacingTargetTime] = useState(0);
+  const [pacingTimeSpent, setPacingTimeSpent] = useState(0);
+  const [pacingSpeedMultiplier, setPacingSpeedMultiplier] = useState(1.0);
+  const [pacingPIDState, setPacingPIDState] = useState({ integral: 0, prevError: 0 });
+  const [pacingAverageWPM, setPacingAverageWPM] = useState(40);
+  const [pacingAverageCPS, setPacingAverageCPS] = useState(3.0);
+  const [pacingTotalWords, setPacingTotalWords] = useState(0);
+  const [pacingTotalChars, setPacingTotalChars] = useState(0);
+  const [pacingTotalTime, setPacingTotalTime] = useState(0);
+  const [pacingInBreak, setPacingInBreak] = useState(false);
+  const [pacingBreakTimer, setPacingBreakTimer] = useState(0);
+  const [pacingMode, setPacingMode] = useState("writing"); // "reading" | "writing"
+  const [pacingCompletedStats, setPacingCompletedStats] = useState(null); // null | { words, chars, time, wpm, cps, mode }
+  const [pacingWordsSinceBreak, setPacingWordsSinceBreak] = useState(0);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
   const [tourStep, setTourStep] = useState(null);
 
   // Create Resource form inside active workspace
@@ -1103,15 +1162,142 @@ export default function App() {
     }
   }, [deletedItems, currentUser]);
 
-  const activeTopic = topics.find((t) => t.id === activeTopicId) || null;
-  const accentHex = activeTopic ? (ACCENTS[activeTopic.accent] || "#C9974D") : "#C9974D";
+  // Page Transition States
+  const [renderedView, setRenderedView] = useState(activeView);
+  const [renderedTopicId, setRenderedTopicId] = useState(activeTopicId);
+  const [isFlippingPage, setIsFlippingPage] = useState(false);
+  const [pageFlipClass, setPageFlipClass] = useState("");
+
+  // Tab Transition States
+  const [renderedTab, setRenderedTab] = useState(activeTab);
+  const [isFlippingTab, setIsFlippingTab] = useState(false);
+  const [tabFlipClass, setTabFlipClass] = useState("");
+
+  // Sync rendered values immediately when currentUser changes to avoid animation on login/logout
+  useEffect(() => {
+    setRenderedView(activeView);
+    setRenderedTopicId(activeTopicId);
+    setRenderedTab(activeTab);
+  }, [currentUser]);
+
+  // Effect to handle page flipping transition when activeView or activeTopicId changes
+  useEffect(() => {
+    if (renderedView === activeView && renderedTopicId === activeTopicId) {
+      return;
+    }
+
+    const oldIndex = ringItems.findIndex((item) => {
+      if (renderedView === "topic") return item.id === renderedTopicId;
+      return item.id === renderedView;
+    });
+    const newIndex = ringItems.findIndex((item) => {
+      if (activeView === "topic") return item.id === activeTopicId;
+      return item.id === activeView;
+    });
+
+    const isForward = newIndex >= oldIndex;
+    const outClass = isForward ? "page-slide-left-out" : "page-slide-right-out";
+    const inClass = isForward ? "page-slide-left-in" : "page-slide-right-in";
+    
+    setIsFlippingPage(true);
+    setPageFlipClass(outClass);
+    
+    const timeoutMid = setTimeout(() => {
+      setRenderedView(activeView);
+      setRenderedTopicId(activeTopicId);
+      setPageFlipClass(inClass);
+    }, 250);
+
+    const timeoutEnd = setTimeout(() => {
+      setIsFlippingPage(false);
+      setPageFlipClass("");
+    }, 500);
+
+    return () => {
+      clearTimeout(timeoutMid);
+      clearTimeout(timeoutEnd);
+    };
+  }, [activeView, activeTopicId]);
+
+  // Effect to handle tab flipping transition when activeTab changes
+  useEffect(() => {
+    if (renderedTab === activeTab) {
+      return;
+    }
+
+    const oldIndex = TABS.indexOf(renderedTab);
+    const newIndex = TABS.indexOf(activeTab);
+
+    const isForward = newIndex >= oldIndex;
+    const outClass = isForward ? "page-slide-left-out" : "page-slide-right-out";
+    const inClass = isForward ? "page-slide-left-in" : "page-slide-right-in";
+    
+    setIsFlippingTab(true);
+    setTabFlipClass(outClass);
+    
+    const timeoutMid = setTimeout(() => {
+      setRenderedTab(activeTab);
+      setTabFlipClass(inClass);
+    }, 250);
+
+    const timeoutEnd = setTimeout(() => {
+      setIsFlippingTab(false);
+      setTabFlipClass("");
+    }, 500);
+
+    return () => {
+      clearTimeout(timeoutMid);
+      clearTimeout(timeoutEnd);
+    };
+  }, [activeTab]);
+
+  const activeTopicRaw = topics.find((t) => t.id === activeTopicId) || null;
+  const accentHexRaw = activeTopicRaw ? (ACCENTS[activeTopicRaw.accent] || "#C9974D") : "#C9974D";
+
+  const renderedTopic = topics.find((t) => t.id === renderedTopicId) || null;
+  const renderedAccentHex = renderedTopic ? (ACCENTS[renderedTopic.accent] || "#C9974D") : "#C9974D";
+
+  // Use the rendered versions for all JSX content to ensure animations freeze state
+  const activeTopic = renderedTopic;
+  const accentHex = renderedAccentHex;
 
   // Track Recently Viewed whenever activeTopic changes
   useEffect(() => {
-    if (activeTopic) {
-      addToRecentlyViewed(activeTopic.id, "topic", activeTopic.name);
+    if (activeTopicRaw) {
+      addToRecentlyViewed(activeTopicRaw.id, "topic", activeTopicRaw.name);
     }
   }, [activeTopicId]);
+
+  // Google OAuth hash listener
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash) {
+      const params = new URLSearchParams(hash.replace("#", "?"));
+      const token = params.get("access_token");
+      if (token) {
+        localStorage.setItem("rkv_gdrive_token", token);
+        setGdriveToken(token);
+        localStorage.setItem("rkv_sync_provider", "gdrive");
+        setSyncProvider("gdrive");
+        // Clear hash from address bar
+        window.history.replaceState(null, null, window.location.pathname + window.location.search);
+        showToast("Connected to Google Drive successfully!");
+        
+        // Fetch user email to show connection info
+        fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.email) {
+              localStorage.setItem("rkv_gdrive_email", data.email);
+              setGdriveEmail(data.email);
+            }
+          })
+          .catch(e => console.error("Error fetching Google userinfo:", e));
+      }
+    }
+  }, []);
 
   const addToRecentlyViewed = (id, type, name, topicName = null) => {
     setRecentlyViewed((prev) => {
@@ -1123,8 +1309,8 @@ export default function App() {
 
   // Set default active resource when switching views/topics
   useEffect(() => {
-    if (activeView === "topic" && activeTopic?.resources?.length > 0) {
-      setActiveResourceId(activeTopic.resources[0].id);
+    if (activeView === "topic" && activeTopicRaw?.resources?.length > 0) {
+      setActiveResourceId(activeTopicRaw.resources[0].id);
     } else if (activeView === "unsorted" && unsortedResources.length > 0) {
       setActiveResourceId(unsortedResources[0].id);
     } else {
@@ -1138,14 +1324,320 @@ export default function App() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  // Guided Pacing Timer effect
+  useEffect(() => {
+    let timerInterval = null;
+    if (pacingActive && pacingIsPlaying) {
+      timerInterval = setInterval(() => {
+        if (pacingInBreak) {
+          setPacingBreakTimer((prev) => {
+            if (prev <= 1) {
+              setPacingInBreak(false);
+              const nextSentence = pacingSentences[pacingCurrentIndex];
+              if (nextSentence) {
+                const nextTarget = calculateTargetTime(nextSentence.text, pacingSpeedMultiplier);
+                setPacingTargetTime(nextTarget);
+                setPacingTimeRemaining(nextTarget);
+                setPacingTimeSpent(0);
+              }
+              return 0;
+            }
+            return prev - 1;
+          });
+        } else {
+          setPacingTimeSpent((prev) => prev + 1);
+          if (pacingMode === "writing") {
+            setPacingTimeRemaining((prev) => {
+              if (prev <= 1) {
+                handlePacingNext(true);
+                return 0;
+              }
+              return prev - 1;
+            });
+          }
+        }
+      }, 1000);
+    }
+    return () => {
+      if (timerInterval) clearInterval(timerInterval);
+    };
+  }, [pacingActive, pacingIsPlaying, pacingCurrentIndex, pacingTargetTime, pacingTimeSpent, pacingPIDState, pacingSpeedMultiplier, pacingInBreak, pacingBreakTimer, pacingMode, pacingSentences]);
+
+  // Scroll active sentence into view
+  useEffect(() => {
+    if (pacingActive) {
+      const activeEl = document.querySelector(".pacing-highlighted-sentence");
+      if (activeEl) {
+        activeEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+  }, [pacingCurrentIndex, pacingActive]);
+
+  // Speak sentence in reading mode when sentence or index changes
+  useEffect(() => {
+    if (pacingActive && pacingIsPlaying && pacingMode === "reading" && pacingSentences.length > 0) {
+      const sentenceText = pacingSentences[pacingCurrentIndex]?.text || "";
+      if (sentenceText && "speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(sentenceText);
+        // Map speed multiplier to speech rate (clamped between 0.5 and 2.5)
+        utterance.rate = Math.max(0.5, Math.min(2.5, pacingSpeedMultiplier));
+        utterance.onend = () => {
+          if (pacingActive && pacingIsPlaying && pacingMode === "reading") {
+            handlePacingNext(false);
+          }
+        };
+        // Avoid garbage collection in Chromium/Safari causing speech to die prematurely
+        window.activeUtterance = utterance;
+        window.speechSynthesis.speak(utterance);
+      }
+    }
+  }, [pacingCurrentIndex, pacingActive, pacingIsPlaying, pacingMode, pacingSpeedMultiplier, pacingSentences]);
+
+  // Cancel speech on pause or session exit
+  useEffect(() => {
+    if (!pacingIsPlaying || !pacingActive) {
+      if ("speechSynthesis" in window) {
+        window.speechSynthesis.cancel();
+      }
+    }
+  }, [pacingIsPlaying, pacingActive]);
+
+  const splitIntoSentences = (text) => {
+    if (!text) return [];
+    const paragraphs = text.split(/\n+/).filter(Boolean);
+    const result = [];
+    paragraphs.forEach((para, paraIdx) => {
+      const sentences = para.match(/[^.!?]+[.!?]+(\s|$)/g) || [para];
+      const trimmedSentences = sentences.map(s => s.trim()).filter(Boolean);
+      trimmedSentences.forEach((sent, sentIdx) => {
+        result.push({
+          text: sent,
+          paragraphIndex: paraIdx,
+          isLastInParagraph: sentIdx === trimmedSentences.length - 1
+        });
+      });
+    });
+    return result;
+  };
+
+  const calculateTargetTime = (sentenceText, speedMultiplier, currentWPM = pacingAverageWPM, currentCPS = pacingAverageCPS) => {
+    const wordCount = sentenceText.split(/\s+/).filter(Boolean).length || 1;
+    const charCount = sentenceText.length || 1;
+    
+    // Estimates in seconds based on words and characters
+    const timeFromWords = wordCount / (currentWPM / 60); 
+    const timeFromChars = charCount / currentCPS;         
+    
+    // Hybrid target is a weighted average of word-based and character-based speed
+    const hybridBaseTime = (timeFromWords * 0.5) + (timeFromChars * 0.5);
+    
+    // Scale by speedMultiplier (PID adjustments)
+    const target = Math.round(hybridBaseTime / speedMultiplier);
+    
+    return Math.max(10, Math.min(120, target));
+  };
+
+  const startPacingSession = (item) => {
+    const text = item.text || item.statement || "";
+    const sentences = splitIntoSentences(text);
+    if (sentences.length === 0) {
+      showToast("No readable text found for pacing");
+      return;
+    }
+    const savedMultiplier = item.pacingSettings?.speedMultiplier || 1.0;
+    const defaultMode = item.pacingSettings?.pacingMode || "writing";
+    const savedWPM = item.pacingSettings?.averageWPM || (defaultMode === "writing" ? 40 : 200);
+    const savedCPS = item.pacingSettings?.averageCPS || (defaultMode === "writing" ? 3.0 : 15.0);
+
+    setPacingTargetId(item.id);
+    setPacingSentences(sentences);
+    setPacingCurrentIndex(0);
+    setPacingSpeedMultiplier(savedMultiplier);
+    setPacingMode(defaultMode);
+    setPacingAverageWPM(savedWPM);
+    setPacingAverageCPS(savedCPS);
+    setPacingTotalWords(0);
+    setPacingTotalChars(0);
+    setPacingTotalTime(0);
+    setPacingInBreak(false);
+    setPacingBreakTimer(0);
+    setPacingPIDState({ integral: 0, prevError: 0 });
+    
+    const target = calculateTargetTime(sentences[0].text, savedMultiplier, savedWPM, savedCPS);
+    setPacingTargetTime(target);
+    setPacingTimeRemaining(target);
+    setPacingTimeSpent(0);
+    setPacingActive(true);
+    setPacingIsPlaying(true);
+  };
+
+  const togglePacingMode = () => {
+    const nextMode = pacingMode === "writing" ? "reading" : "writing";
+    setPacingMode(nextMode);
+    
+    const targetWPM = nextMode === "writing" ? 40 : 200;
+    const targetCPS = nextMode === "writing" ? 3.0 : 15.0;
+    
+    setPacingAverageWPM(targetWPM);
+    setPacingAverageCPS(targetCPS);
+    setPacingTotalWords(0);
+    setPacingTotalChars(0);
+    setPacingTotalTime(0);
+    
+    const currentSentenceText = pacingSentences[pacingCurrentIndex]?.text || "";
+    const target = calculateTargetTime(currentSentenceText, pacingSpeedMultiplier, targetWPM, targetCPS);
+    setPacingTargetTime(target);
+    setPacingTimeRemaining(target);
+    setPacingTimeSpent(0);
+    showToast(`Switched to ${nextMode === "writing" ? "Writing Mode (40 WPM)" : "Reading Mode (200 WPM)"}`);
+  };
+
+  const savePacingSettings = (id, multiplier, wpm, cps, mode = pacingMode) => {
+    if (!id) return;
+    setTopics((prevTopics) =>
+      prevTopics.map((topic) => {
+        const hasNote = topic.notes.some((n) => n.id === id);
+        const hasDisc = topic.discoveries.some((d) => d.id === id);
+        if (!hasNote && !hasDisc) return topic;
+        return {
+          ...topic,
+          notes: topic.notes.map((n) =>
+            n.id === id ? { ...n, pacingSettings: { speedMultiplier: multiplier, averageWPM: wpm, averageCPS: cps, pacingMode: mode } } : n
+          ),
+          discoveries: topic.discoveries.map((d) =>
+            d.id === id ? { ...d, pacingSettings: { speedMultiplier: multiplier, averageWPM: wpm, averageCPS: cps, pacingMode: mode } } : d
+          ),
+        };
+      })
+    );
+    setUnsortedResources((prevUnsorted) =>
+      prevUnsorted.map((r) =>
+        r.id === id ? { ...r, pacingSettings: { speedMultiplier: multiplier, averageWPM: wpm, averageCPS: cps, pacingMode: mode } } : r
+      )
+    );
+  };
+
+  const handlePacingNext = (isTimeout = false) => {
+    const actualTime = pacingTimeSpent;
+    const targetTime = pacingTargetTime;
+    
+    // Calculate and update metrics for current sentence
+    const currentSentenceObj = pacingSentences[pacingCurrentIndex] || {};
+    const currentSentenceText = currentSentenceObj.text || "";
+    const words = currentSentenceText.split(/\s+/).filter(Boolean).length || 1;
+    const chars = currentSentenceText.length || 1;
+    const timeSpent = Math.max(1, actualTime);
+    
+    const newTotalWords = pacingTotalWords + words;
+    const newTotalChars = pacingTotalChars + chars;
+    const newTotalTime = pacingTotalTime + timeSpent;
+    
+    const newWPM = Math.max(10, Math.min(300, (newTotalWords / newTotalTime) * 60));
+    const newCPS = Math.max(0.5, Math.min(25.0, newTotalChars / newTotalTime));
+    
+    setPacingTotalWords(newTotalWords);
+    setPacingTotalChars(newTotalChars);
+    setPacingTotalTime(newTotalTime);
+    setPacingAverageWPM(newWPM);
+    setPacingAverageCPS(newCPS);
+
+    const error = isTimeout ? -0.35 : (targetTime - actualTime) / targetTime;
+    const Kp = 0.4;
+    const Ki = 0.1;
+    const Kd = 0.15;
+    
+    const nextIntegral = Math.max(-2, Math.min(2, pacingPIDState.integral + error));
+    const derivative = error - pacingPIDState.prevError;
+    const delta = (Kp * error) + (Ki * nextIntegral) + (Kd * derivative);
+    const newMultiplier = Math.max(0.2, Math.min(3.0, pacingSpeedMultiplier * (1 + delta)));
+    
+    setPacingSpeedMultiplier(newMultiplier);
+    setPacingPIDState({ integral: nextIntegral, prevError: error });
+    savePacingSettings(pacingTargetId, newMultiplier, newWPM, newCPS, pacingMode);
+    
+    if (pacingCurrentIndex < pacingSentences.length - 1) {
+      if (currentSentenceObj.isLastInParagraph && pacingMode === "writing") {
+        setPacingInBreak(true);
+        setPacingBreakTimer(10); // 10s rest break
+      } else {
+        const nextIdx = pacingCurrentIndex + 1;
+        setPacingCurrentIndex(nextIdx);
+        const nextSentence = pacingSentences[nextIdx];
+        const nextTarget = calculateTargetTime(nextSentence.text, newMultiplier, newWPM, newCPS);
+        setPacingTargetTime(nextTarget);
+        setPacingTimeRemaining(nextTarget);
+        setPacingTimeSpent(0);
+      }
+    } else {
+      setPacingIsPlaying(false);
+      setPacingActive(false);
+      
+      const totalS = newTotalTime;
+      const finalWPM = Math.round((newTotalWords / Math.max(1, totalS)) * 60);
+      const finalCPS = (newTotalChars / Math.max(1, totalS)).toFixed(1);
+      
+      setPacingCompletedStats({
+        words: newTotalWords,
+        chars: newTotalChars,
+        time: totalS,
+        wpm: finalWPM,
+        cps: finalCPS,
+        mode: pacingMode
+      });
+
+      // Update global reading/writing settings metrics in localStorage
+      if (pacingMode === "reading") {
+        const currentGlobal = parseFloat(localStorage.getItem("pacing_global_reading_wpm")) || 200;
+        const nextGlobal = Math.round(currentGlobal * 0.7 + finalWPM * 0.3);
+        localStorage.setItem("pacing_global_reading_wpm", nextGlobal.toString());
+      } else {
+        const currentGlobal = parseFloat(localStorage.getItem("pacing_global_writing_wpm")) || 40;
+        const nextGlobal = Math.round(currentGlobal * 0.7 + finalWPM * 0.3);
+        localStorage.setItem("pacing_global_writing_wpm", nextGlobal.toString());
+      }
+    }
+  };
+
+  const handlePacingPrev = () => {
+    const error = -0.5;
+    const Kp = 0.4;
+    const Ki = 0.1;
+    const Kd = 0.15;
+    
+    const nextIntegral = Math.max(-2, Math.min(2, pacingPIDState.integral + error));
+    const derivative = error - pacingPIDState.prevError;
+    const delta = (Kp * error) + (Ki * nextIntegral) + (Kd * derivative);
+    const newMultiplier = Math.max(0.2, Math.min(3.0, pacingSpeedMultiplier * (1 + delta)));
+    
+    setPacingSpeedMultiplier(newMultiplier);
+    setPacingPIDState({ integral: nextIntegral, prevError: error });
+    savePacingSettings(pacingTargetId, newMultiplier, pacingAverageWPM, pacingAverageCPS, pacingMode);
+
+    if (pacingCurrentIndex > 0) {
+      const nextIdx = pacingCurrentIndex - 1;
+      setPacingCurrentIndex(nextIdx);
+      const prevSentence = pacingSentences[nextIdx];
+      const nextTarget = calculateTargetTime(prevSentence.text, newMultiplier, pacingAverageWPM, pacingAverageCPS);
+      setPacingTargetTime(nextTarget);
+      setPacingTimeRemaining(nextTarget);
+      setPacingTimeSpent(0);
+      setPacingInBreak(false);
+    }
+  };
+
   /* --- File Import/Export System --- */
-  const exportData = async () => {
-    showToast("Preparing export (reading attachments)…");
+  const exportData = async (includeAttachments = true) => {
     let attachments = {};
-    try {
-      attachments = await attachmentDb.getAllEntries();
-    } catch (err) {
-      console.warn("Could not read IndexedDB attachments for export:", err);
+    if (includeAttachments) {
+      showToast("Preparing full export (reading attachments)…");
+      try {
+        attachments = await attachmentDb.getAllEntries();
+      } catch (err) {
+        console.warn("Could not read IndexedDB attachments for export:", err);
+      }
+    } else {
+      showToast("Preparing structure & notes export…");
     }
 
     const data = {
@@ -1163,14 +1655,18 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `research_vault_backup_${new Date().toISOString().split("T")[0]}.json`;
+    link.download = `research_vault_backup_${includeAttachments ? "full" : "metadata"}_${new Date().toISOString().split("T")[0]}.json`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
 
-    const attachCount = Object.keys(attachments).length;
-    showToast(`Vault exported — ${attachCount} attachment${attachCount !== 1 ? "s" : ""} included`);
+    if (includeAttachments) {
+      const attachCount = Object.keys(attachments).length;
+      showToast(`Full vault exported — ${attachCount} attachment${attachCount !== 1 ? "s" : ""} included`);
+    } else {
+      showToast("Vault structure & notes exported (excluding files).");
+    }
   };
 
   const importData = (e) => {
@@ -1226,7 +1722,8 @@ export default function App() {
   };
 
 
-  /* --- Nextcloud WebDAV Sync System --- */
+  /* --- Cloud Sync and Smart Sync Systems --- */
+
   const getNextcloudHeaders = () => {
     return {
       "Authorization": "Basic " + btoa(`${ncUser}:${ncPass}`),
@@ -1241,174 +1738,304 @@ export default function App() {
     return `${base}${ncPath.trim() || "vault_backup.json"}`;
   };
 
-  const syncToNextcloud = async () => {
-    const url = getNextcloudUrl();
-    if (!url) {
-      setAlertDialog({ message: "Please configure your Nextcloud WebDAV URL in Settings first." });
-      return;
-    }
-    setSyncStatus("Syncing");
-
-    try {
-      // 1. PULL FIRST
-      let remoteData = null;
-      try {
-        const pullRes = await fetch(url, { method: "GET", headers: getNextcloudHeaders() });
-        if (pullRes.ok) {
-          remoteData = await pullRes.json();
-        }
-      } catch (err) {
-        console.warn("Could not pull remote data for merge (it might not exist yet):", err);
-      }
-
-      // 2. MERGE LOGIC
-      let finalTopics = [...topics];
-      let finalUnsorted = [...unsortedResources];
-      let finalDeleted = [...deletedItems];
-
-      if (remoteData) {
-        // Merge deletedItems: Combine local and remote tombstones
-        const remoteDeleted = remoteData.deletedItems || [];
-        const mergedDeletedIds = new Set([...finalDeleted.map(d => d.id), ...remoteDeleted.map(d => d.id)]);
-        finalDeleted = Array.from(mergedDeletedIds).map(id => 
-          finalDeleted.find(d => d.id === id) || remoteDeleted.find(d => d.id === id)
-        );
-
-        // Merge Unsorted
-        const remoteUnsorted = remoteData.unsortedResources || [];
-        remoteUnsorted.forEach(remoteRes => {
-          if (!finalUnsorted.find(r => r.id === remoteRes.id) && !mergedDeletedIds.has(remoteRes.id)) {
-            finalUnsorted.push(remoteRes);
-          }
-        });
-        finalUnsorted = finalUnsorted.filter(r => !mergedDeletedIds.has(r.id));
-
-        // Merge Topics
-        const remoteTopics = remoteData.topics || [];
-        remoteTopics.forEach(remoteTopic => {
-          if (mergedDeletedIds.has(remoteTopic.id)) return;
-
-          const localTopicIndex = finalTopics.findIndex(t => t.id === remoteTopic.id);
-          if (localTopicIndex === -1) {
-            finalTopics.push(remoteTopic); // Brand new topic from remote
-          } else {
-            // Deep Merge inside the Topic
-            const localTopic = finalTopics[localTopicIndex];
-            
-            const mergedRes = [...localTopic.resources];
-            (remoteTopic.resources || []).forEach(r => {
-              if (!mergedRes.find(x => x.id === r.id) && !mergedDeletedIds.has(r.id)) mergedRes.push(r);
-            });
-
-            const mergedNotes = [...localTopic.notes];
-            (remoteTopic.notes || []).forEach(n => {
-              if (!mergedNotes.find(x => x.id === n.id) && !mergedDeletedIds.has(n.id)) mergedNotes.push(n);
-            });
-
-            const mergedDisc = [...localTopic.discoveries];
-            (remoteTopic.discoveries || []).forEach(d => {
-              if (!mergedDisc.find(x => x.id === d.id) && !mergedDeletedIds.has(d.id)) mergedDisc.push(d);
-            });
-            
-            const mergedSources = [...localTopic.sources];
-            (remoteTopic.sources || []).forEach(s => {
-              if (!mergedSources.find(x => x.id === s.id) && !mergedDeletedIds.has(s.id)) mergedSources.push(s);
-            });
-
-            finalTopics[localTopicIndex] = {
-              ...localTopic,
-              resources: mergedRes.filter(x => !mergedDeletedIds.has(x.id)),
-              notes: mergedNotes.filter(x => !mergedDeletedIds.has(x.id)),
-              discoveries: mergedDisc.filter(x => !mergedDeletedIds.has(x.id)),
-              sources: mergedSources.filter(x => !mergedDeletedIds.has(x.id))
-            };
-          }
-        });
-        
-        finalTopics = finalTopics.filter(t => !mergedDeletedIds.has(t.id));
-      }
-
-      // 3. Update Local State with merged data
-      setTopics(finalTopics);
-      setUnsortedResources(finalUnsorted);
-      setDeletedItems(finalDeleted);
-
-      // 4. PUSH MERGED DATA
-      const data = {
-        topics: finalTopics,
-        unsortedResources: finalUnsorted,
-        recentlyViewed,
-        deletedItems: finalDeleted
-      };
-
-      const response = await fetch(url, {
-        method: "PUT",
-        headers: getNextcloudHeaders(),
-        body: JSON.stringify(data, null, 2)
-      });
-      
-      if (response.ok) {
-        const timeStr = new Date().toLocaleTimeString();
-        setSyncStatus("Success");
-        setLastSync(timeStr);
-        localStorage.setItem("rkv_nc_last_sync", timeStr);
-        showToast("Vault successfully merged and uploaded to Nextcloud!");
-      } else {
-        setSyncStatus("Error");
-        let bodyText = "";
-        try { bodyText = await response.text(); } catch(e){}
-        setAlertDialog({ message: `Failed to upload. Status: ${response.status} ${response.statusText}\nDetail: ${bodyText.substring(0, 150)}` });
-      }
-    } catch (err) {
-      setSyncStatus("Error");
-      setAlertDialog({ message: `Sync connection error: ${err.name} - ${err.message}\nMake sure your WebDAV URL is exact (e.g. https://server.com/remote.php/webdav/) and your App Password is correct.` });
-    }
+  // Google OAuth helpers
+  const handleConnectGDrive = () => {
+    const clientId = gdriveClientId.trim() || DEFAULT_GDRIVE_CLIENT_ID;
+    const redirectUri = window.location.origin + window.location.pathname;
+    const scope = "https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/userinfo.email";
+    const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}`;
+    window.location.href = authUrl;
   };
 
-  const syncFromNextcloud = async () => {
-    const url = getNextcloudUrl();
-    if (!url) {
-      setAlertDialog({ message: "Please configure your Nextcloud WebDAV URL in Settings first." });
-      return;
-    }
+  const handleDisconnectGDrive = () => {
+    localStorage.removeItem("rkv_gdrive_token");
+    localStorage.removeItem("rkv_gdrive_email");
+    setGdriveToken("");
+    setGdriveEmail("");
+    showToast("Disconnected from Google Drive.");
+  };
+
+  // Google Drive REST API helpers
+  const findGDriveFile = async (token) => {
+    const res = await fetch("https://www.googleapis.com/drive/v3/files?q=name='vault_backup.json'&spaces=appDataFolder&fields=files(id,name)", {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`Google Drive API returned status ${res.status}`);
+    const data = await res.json();
+    return data.files && data.files.length > 0 ? data.files[0] : null;
+  };
+
+  const downloadGDriveFile = async (token, fileId) => {
+    const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!res.ok) throw new Error(`Google Drive download failed: ${res.status}`);
+    return await res.json();
+  };
+
+  const uploadGDriveFile = async (token, fileId, encryptedPayload) => {
+    const boundary = "foo_bar_boundary";
+    const metadata = {
+      name: "vault_backup.json",
+      parents: fileId ? undefined : ["appDataFolder"]
+    };
+
+    const multipartBody = 
+      `\r\n--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify(metadata) +
+      `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n` +
+      JSON.stringify(encryptedPayload) +
+      `\r\n--${boundary}--`;
+
+    const url = fileId 
+      ? `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`
+      : "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
+
+    const res = await fetch(url, {
+      method: fileId ? "PATCH" : "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": `multipart/related; boundary=${boundary}`
+      },
+      body: multipartBody
+    });
+
+    if (!res.ok) throw new Error(`Google Drive upload failed: ${res.status}`);
+    return await res.json();
+  };
+
+  // Smart Sync Merging Engine
+  const smartMergeVaults = (localData, remoteData) => {
+    const topicMap = {};
+    
+    // Union local topics
+    (localData.topics || []).forEach(t => {
+      topicMap[t.id] = { 
+        ...t, 
+        resources: [...(t.resources || [])], 
+        notes: [...(t.notes || [])], 
+        discoveries: [...(t.discoveries || [])], 
+        sources: [...(t.sources || [])] 
+      };
+    });
+    
+    // Union remote topics
+    (remoteData.topics || []).forEach(remoteTopic => {
+      const localTopic = topicMap[remoteTopic.id];
+      if (!localTopic) {
+        topicMap[remoteTopic.id] = remoteTopic;
+      } else {
+        const mergedTopic = {
+          ...localTopic,
+          name: remoteTopic.name || localTopic.name,
+          accent: remoteTopic.accent || localTopic.accent,
+        };
+        
+        // Merge resources
+        const resMap = {};
+        (localTopic.resources || []).forEach(r => { resMap[r.id] = r; });
+        (remoteTopic.resources || []).forEach(r => {
+          if (!resMap[r.id] || new Date(r.date) > new Date(resMap[r.id].date)) {
+            resMap[r.id] = r;
+          }
+        });
+        mergedTopic.resources = Object.values(resMap);
+
+        // Merge notes
+        const noteMap = {};
+        (localTopic.notes || []).forEach(n => { noteMap[n.id] = n; });
+        (remoteTopic.notes || []).forEach(n => {
+          if (!noteMap[n.id] || new Date(n.date) > new Date(noteMap[n.id].date)) {
+            noteMap[n.id] = n;
+          }
+        });
+        mergedTopic.notes = Object.values(noteMap);
+
+        // Merge discoveries
+        const discMap = {};
+        (localTopic.discoveries || []).forEach(d => { discMap[d.id] = d; });
+        (remoteTopic.discoveries || []).forEach(d => {
+          if (!discMap[d.id] || new Date(d.date) > new Date(discMap[d.id].date)) {
+            discMap[d.id] = d;
+          }
+        });
+        mergedTopic.discoveries = Object.values(discMap);
+
+        // Merge sources
+        const srcMap = {};
+        (localTopic.sources || []).forEach(s => { srcMap[s.id] = s; });
+        (remoteTopic.sources || []).forEach(s => {
+          srcMap[s.id] = s;
+        });
+        mergedTopic.sources = Object.values(srcMap);
+
+        topicMap[remoteTopic.id] = mergedTopic;
+      }
+    });
+
+    // Merge Unsorted
+    const unsortedMap = {};
+    (localData.unsortedResources || []).forEach(r => { unsortedMap[r.id] = r; });
+    (remoteData.unsortedResources || []).forEach(r => {
+      if (!unsortedMap[r.id] || new Date(r.date) > new Date(unsortedMap[r.id].date)) {
+        unsortedMap[r.id] = r;
+      }
+    });
+
+    // Merge Recently Viewed
+    const recentMap = {};
+    (localData.recentlyViewed || []).forEach(rv => { recentMap[rv.id || rv.name] = rv; });
+    (remoteData.recentlyViewed || []).forEach(rv => {
+      if (!recentMap[rv.id || rv.name] || rv.timestamp > recentMap[rv.id || rv.name].timestamp) {
+        recentMap[rv.id || rv.name] = rv;
+      }
+    });
+    const mergedRecent = Object.values(recentMap)
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 15);
+
+    // Merge Deleted Items (Tombstones)
+    const deletedMap = {};
+    (localData.deletedItems || []).forEach(d => { deletedMap[d.id] = d; });
+    (remoteData.deletedItems || []).forEach(d => { deletedMap[d.id] = d; });
+
+    return {
+      topics: Object.values(topicMap),
+      unsortedResources: Object.values(unsortedMap),
+      recentlyViewed: mergedRecent,
+      deletedItems: Object.values(deletedMap)
+    };
+  };
+
+  // Unified Smart Sync Action
+  const runSmartSync = async (silent = false) => {
     setSyncStatus("Syncing");
     try {
-      const response = await fetch(url, {
-        method: "GET",
-        headers: getNextcloudHeaders()
-      });
-      if (response.ok) {
-        const parsed = await response.json();
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          const cleanTopics = sanitizeAndMigrateTopics(parsed.topics || []);
-          setTopics(cleanTopics);
-          if (parsed.unsortedResources) setUnsortedResources(parsed.unsortedResources);
-          if (parsed.recentlyViewed) setRecentlyViewed(parsed.recentlyViewed);
-          if (cleanTopics.length > 0) {
-            setActiveTopicId(cleanTopics[0].id);
-            setActiveView("topic");
-          }
-          const timeStr = new Date().toLocaleTimeString();
-          setSyncStatus("Success");
-          setLastSync(timeStr);
-          localStorage.setItem("rkv_nc_last_sync", timeStr);
-          showToast("Vault successfully pulled from Nextcloud!");
-        } else {
-          setSyncStatus("Error");
-          setAlertDialog({ message: "Remote sync payload has an invalid format." });
-        }
-      } else if (response.status === 404) {
-        setSyncStatus("Idle");
-        setAlertDialog({ message: "No remote backup file found on Nextcloud yet. Push your local data first." });
-      } else {
-        setSyncStatus("Error");
-        let bodyText = "";
-        try { bodyText = await response.text(); } catch(e){}
-        setAlertDialog({ message: `Failed to download. Status: ${response.status} ${response.statusText}\nDetail: ${bodyText.substring(0, 150)}` });
+      // 1. Gather Local Data
+      const localData = {
+        topics,
+        unsortedResources,
+        recentlyViewed,
+        deletedItems
+      };
+      
+      let localAttachments = {};
+      try {
+        localAttachments = await attachmentDb.getAllEntries();
+      } catch (err) {
+        console.warn("Failed to get local attachments for sync:", err);
       }
+
+      let remotePayload = null;
+      let gdriveFileId = null;
+
+      // 2. Pull Remote Data
+      if (syncProvider === "nextcloud") {
+        const url = getNextcloudUrl();
+        if (!url) {
+          setSyncStatus("Idle");
+          if (!silent) {
+            setAlertDialog({ message: "Please configure your Nextcloud WebDAV URL in Settings first." });
+          }
+          return;
+        }
+        try {
+          const res = await fetch(url, { method: "GET", headers: getNextcloudHeaders() });
+          if (res.ok) {
+            remotePayload = await res.json();
+          }
+        } catch (e) {
+          console.warn("Could not pull remote Nextcloud backup, assuming first-time sync:", e);
+        }
+      } else if (syncProvider === "gdrive") {
+        if (!gdriveToken) {
+          setSyncStatus("Idle");
+          if (!silent) {
+            handleConnectGDrive();
+          }
+          return;
+        }
+        try {
+          const fileMeta = await findGDriveFile(gdriveToken);
+          if (fileMeta) {
+            gdriveFileId = fileMeta.id;
+            remotePayload = await downloadGDriveFile(gdriveToken, gdriveFileId);
+          }
+        } catch (e) {
+          console.warn("Could not pull remote Google Drive backup, assuming first-time sync:", e);
+        }
+      } else {
+        setSyncStatus("Idle");
+        if (!silent) {
+          setAlertDialog({ message: "No cloud sync provider selected." });
+        }
+        return;
+      }
+
+      // 3. Perform Smart Merging
+      let mergedData = localData;
+      let mergedAttachments = localAttachments;
+
+      if (remotePayload) {
+        mergedData = smartMergeVaults(localData, remotePayload);
+        if (remotePayload._attachments) {
+          mergedAttachments = { ...localAttachments, ...remotePayload._attachments };
+        }
+      }
+
+      // Include attachments in the upload bundle
+      const finalUploadBundle = {
+        ...mergedData,
+        _attachments: mergedAttachments
+      };
+
+      // 4. Update Local State with Merged Results
+      const cleanTopics = sanitizeAndMigrateTopics(mergedData.topics || []);
+      setTopics(cleanTopics);
+      setUnsortedResources(mergedData.unsortedResources || []);
+      setRecentlyViewed(mergedData.recentlyViewed || []);
+      setDeletedItems(mergedData.deletedItems || []);
+
+      if (Object.keys(mergedAttachments).length > 0) {
+        try {
+          await attachmentDb.setMany(mergedAttachments);
+        } catch (err) {
+          console.error("Failed to restore merged IndexedDB attachments locally:", err);
+        }
+      }
+
+      if (cleanTopics.length > 0 && !activeTopicId) {
+        setActiveTopicId(cleanTopics[0].id);
+        setActiveView("topic");
+      }
+
+      // 5. Upload Merged Data Back to Cloud
+      if (syncProvider === "nextcloud") {
+        const url = getNextcloudUrl();
+        const res = await fetch(url, {
+          method: "PUT",
+          headers: getNextcloudHeaders(),
+          body: JSON.stringify(finalUploadBundle, null, 2)
+        });
+        if (!res.ok) throw new Error(`Nextcloud upload failed with status ${res.status}`);
+      } else if (syncProvider === "gdrive") {
+        await uploadGDriveFile(gdriveToken, gdriveFileId, finalUploadBundle);
+      }
+
+      const timeStr = new Date().toLocaleTimeString();
+      setSyncStatus("Success");
+      setLastSync(timeStr);
+      localStorage.setItem("rkv_nc_last_sync", timeStr);
+      if (!silent) {
+        showToast("Smart Sync completed successfully! Local and remote vaults merged.");
+      }
+
     } catch (err) {
+      console.error("Smart Sync error:", err);
       setSyncStatus("Error");
-      setAlertDialog({ message: `Sync connection error: ${err.name} - ${err.message}\nMake sure your WebDAV URL is exact (e.g. https://server.com/remote.php/webdav/) and your App Password is correct.` });
+      if (!silent) {
+        setAlertDialog({ message: `Smart Sync failed: ${err.message}` });
+      }
     }
   };
 
@@ -2383,6 +3010,8 @@ export default function App() {
         setProfileDropdownOpen(false);
         setNotificationsOpen(false);
         setBookMenuOpen(false);
+        setSelectedNoteModal(null);
+        setExportModalOpen(false);
       }
 
       // Ctrl+Shift+T or Ctrl+Alt+T - Create New Topic
@@ -2468,7 +3097,7 @@ export default function App() {
 
         if (!saved) {
           // If no form is active, trigger full sync
-          syncToNextcloud();
+          runSmartSync();
         }
       }
     };
@@ -2476,6 +3105,8 @@ export default function App() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
+    selectedNoteModal,
+    exportModalOpen,
     editingResource,
     editingSource,
     editingDiscovery,
@@ -2499,6 +3130,56 @@ export default function App() {
     convertTitle,
     convertStatement
   ]);
+
+  // Keep a ref of runSmartSync to avoid stale closures in intervals and event listeners
+  const syncRef = useRef(runSmartSync);
+  useEffect(() => {
+    syncRef.current = runSmartSync;
+  }, [runSmartSync]);
+
+  // Auto-sync on startup/login
+  useEffect(() => {
+    if (currentUser) {
+      syncRef.current(true);
+    }
+  }, [currentUser]);
+
+  // Auto-sync on a 30-minute interval
+  useEffect(() => {
+    if (!currentUser) return;
+    const interval = setInterval(() => {
+      syncRef.current(true);
+    }, 30 * 60 * 1000); // 30 minutes
+    return () => clearInterval(interval);
+  }, [currentUser]);
+
+  // Auto-sync on application close (Electron close interception and browser unload)
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // Electron close hook
+    if (window.electronAPI) {
+      const handleAppClose = async () => {
+        try {
+          await syncRef.current(true);
+        } catch (err) {
+          console.error("Auto sync on close failed:", err);
+        }
+        window.electronAPI.confirmClose();
+      };
+      window.electronAPI.onAppClose(handleAppClose);
+    }
+
+    // Web browser/Capacitor unload hook
+    const handleBeforeUnload = () => {
+      syncRef.current(true);
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, [currentUser]);
 
   /* ------------------------------------------------------------------ */
   /* Render Landing & Auth screen when not signed in                    */
@@ -2615,6 +3296,29 @@ export default function App() {
             </form>
           </div>
         )}
+
+        {alertDialog && (
+          <div className="modal-overlay" onClick={() => setAlertDialog(null)}>
+            <div className="modal-card" style={{ maxWidth: "400px" }} onClick={(e) => e.stopPropagation()}>
+              <div className="modal-header">
+                <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <span>⚠️ Notification</span>
+                </h3>
+                <button className="drawer-close-btn" onClick={() => setAlertDialog(null)}>
+                  <X size={18} />
+                </button>
+              </div>
+              <div className="modal-body">
+                <p style={{ fontSize: "14px", color: "var(--text-primary)", lineHeight: "1.5" }}>{alertDialog.message}</p>
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "20px" }}>
+                  <button className="btn-solid" style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }} onClick={() => setAlertDialog(null)}>
+                    OK
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2643,7 +3347,7 @@ export default function App() {
             title="Menu"
             style={{ color: bookMenuOpen ? "var(--accent-brass)" : "inherit" }}
           >
-            <BookOpen size={20} />
+            <User size={20} />
           </button>
           {bookMenuOpen && (
             <div className="profile-dropdown-menu" style={{ left: 0, right: 'auto', top: '40px', zIndex: 100 }}>
@@ -2888,7 +3592,7 @@ export default function App() {
                 title="Research actions menu"
                 style={{ color: bookMenuOpen ? "var(--accent-brass)" : "var(--text-dim)" }}
               >
-                <BookOpen size={16} />
+                <User size={16} />
               </button>
               {bookMenuOpen && (
                 <div className="profile-dropdown-menu" style={{ right: 0, left: 'auto', top: '35px' }}>
@@ -2923,7 +3627,9 @@ export default function App() {
         </header>
 
         {/* Workspace Body */}
-        {activeView === "all-topics" && (
+        <div className="page-turn-container">
+          <div className={`page-turn-wrapper ${pageFlipClass}`}>
+            {renderedView === "all-topics" && (
           <div className={`workspace-page ${tourStep === 1 ? "tour-spotlight-highlight" : ""}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '40vh', padding: '20px', position: 'relative', zIndex: 5 }}>
             <div style={{ textAlign: 'center' }}>
               <h2 className="serif" style={{ fontSize: '32px', marginBottom: '12px', color: 'var(--text-primary)' }}>Research Knowledge Vault</h2>
@@ -2942,7 +3648,7 @@ export default function App() {
           </div>
         )}
 
-        {activeView === "unsorted" && (
+        {renderedView === "unsorted" && (
           <div className="workspace-page">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", flexWrap: "wrap", gap: "16px" }}>
               <div>
@@ -3027,7 +3733,7 @@ export default function App() {
                               </div>
                             </div>
                             {r.url && (r.url.startsWith("data:") || r.url.startsWith("db://")) && (
-                              <OfflineAttachmentPreview url={r.url} title={r.title} type={r.type} />
+                              <OfflineAttachmentPreview url={r.url} title={r.title} type={r.type} currentUser={currentUser} />
                             )}
                           </div>
                         );
@@ -3048,7 +3754,7 @@ export default function App() {
           </div>
         )}
 
-        {activeView === "recently-viewed" && (
+        {renderedView === "recently-viewed" && (
           <div className="workspace-page">
             <h2 className="serif" style={{ fontSize: "26px", marginBottom: "10px" }}>Recently Viewed</h2>
             <p style={{ color: "var(--text-secondary)", marginBottom: "20px", fontSize: "13.5px" }}>
@@ -3109,7 +3815,7 @@ export default function App() {
           </div>
         )}
 
-        {activeView === "appendix" && (
+        {renderedView === "appendix" && (
           <div className="workspace-page">
             <h2 className="serif" style={{ fontSize: "26px", marginBottom: "10px" }}>Appendix & Index</h2>
             <p style={{ color: "var(--text-secondary)", marginBottom: "20px", fontSize: "13.5px" }}>
@@ -3260,16 +3966,16 @@ export default function App() {
           </div>
         )}
 
-        {activeView === "topic" && activeTopic && (
+        {renderedView === "topic" && renderedTopic && (
           <div className="workspace-content">
             <div className="workspace-main-panel">
               {/* Topic Header details */}
               <div className="topic-header-section">
                 <div className="topic-header-left">
-                  <div className="topic-avatar-icon" style={{ background: accentHex }}>
-                    {activeTopic.name.slice(0, 2).toUpperCase()}
+                  <div className="topic-avatar-icon" style={{ background: renderedAccentHex }}>
+                    {renderedTopic.name.slice(0, 2).toUpperCase()}
                   </div>
-                  {editingTopic?.id === activeTopic.id ? (
+                  {editingTopic?.id === renderedTopic.id ? (
                     <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
                       <input
                         type="text"
@@ -3292,23 +3998,23 @@ export default function App() {
                   ) : (
                     <div className="topic-title-area">
                       <div className="topic-title-wrapper">
-                        <h2 className="topic-title-text">{activeTopic.name}</h2>
+                        <h2 className="topic-title-text">{renderedTopic.name}</h2>
                         <button
                           style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer" }}
-                          onClick={() => setEditingTopic({ id: activeTopic.id, name: activeTopic.name, tagline: activeTopic.tagline })}
+                          onClick={() => setEditingTopic({ id: renderedTopic.id, name: renderedTopic.name, tagline: renderedTopic.tagline })}
                           title="Edit Topic title/tagline"
                         >
                           <Edit3 size={14} />
                         </button>
                         <button
                           style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer", marginLeft: "4px" }}
-                          onClick={() => deleteTopic(activeTopic.id)}
+                          onClick={() => deleteTopic(renderedTopic.id)}
                           title="Delete topic container"
                         >
                           <Trash2 size={14} />
                         </button>
                       </div>
-                      <p className="topic-tagline-text">{activeTopic.tagline}</p>
+                      <p className="topic-tagline-text">{renderedTopic.tagline}</p>
                     </div>
                   )}
                 </div>
@@ -3316,11 +4022,11 @@ export default function App() {
                 <div className="topic-header-actions">
                   <button
                     className="btn-icon-square"
-                    style={{ color: activeTopic.starred ? "#C9974D" : "var(--text-secondary)" }}
-                    onClick={() => toggleStarTopic(activeTopic.id)}
+                    style={{ color: renderedTopic.starred ? "#C9974D" : "var(--text-secondary)" }}
+                    onClick={() => toggleStarTopic(renderedTopic.id)}
                     title="Star Topic"
                   >
-                    <Star size={16} fill={activeTopic.starred ? "#C9974D" : "none"} />
+                    <Star size={16} fill={renderedTopic.starred ? "#C9974D" : "none"} />
                   </button>
                 </div>
               </div>
@@ -3328,39 +4034,39 @@ export default function App() {
               {/* Statistics Cards */}
               <div className="topic-stats-grid">
                 <div className="stat-card" onClick={() => setActiveTab("Resources")}>
-                  <span className="stat-card-num">{activeTopic.resources.length}</span>
+                  <span className="stat-card-num">{renderedTopic.resources.length}</span>
                   <span className="stat-card-label">Resources</span>
                   <span className="stat-card-sub">
-                    {activeTopic.resources.filter((r) => r.status === "Unread").length} unread
+                    {renderedTopic.resources.filter((r) => r.status === "Unread").length} unread
                   </span>
                 </div>
                 <div className="stat-card" onClick={() => setActiveTab("Notes")}>
-                  <span className="stat-card-num">{activeTopic.notes.length}</span>
+                  <span className="stat-card-num">{renderedTopic.notes.length}</span>
                   <span className="stat-card-label">Notes</span>
                   <span className="stat-card-sub">Updated today</span>
                 </div>
                 <div className="stat-card" onClick={() => setActiveTab("Discoveries")}>
-                  <span className="stat-card-num">{activeTopic.discoveries.length}</span>
+                  <span className="stat-card-num">{renderedTopic.discoveries.length}</span>
                   <span className="stat-card-label">Discoveries</span>
                   <span className="stat-card-sub">
-                    {activeTopic.discoveries.filter((d) => d.verification === "Verified").length} verified
+                    {renderedTopic.discoveries.filter((d) => d.verification === "Verified").length} verified
                   </span>
                 </div>
                 <div className="stat-card" onClick={() => setActiveTab("Sources")}>
-                  <span className="stat-card-num">{activeTopic.sources.length}</span>
+                  <span className="stat-card-num">{renderedTopic.sources.length}</span>
                   <span className="stat-card-label">Sources</span>
                   <span className="stat-card-sub">View list</span>
                 </div>
 
                 {/* Progress Tracker Card */}
-                <div className="progress-stat-card" style={{ "--accent-color": accentHex }}>
+                <div className="progress-stat-card" style={{ "--accent-color": renderedAccentHex }}>
                   <div>
                     <span className="stat-card-label" style={{ display: "block", marginBottom: "4px" }}>Progress</span>
                     <span className="mono" style={{ fontSize: "16px", fontWeight: "600" }}>
-                      {activeTopic.resources.length > 0
+                      {renderedTopic.resources.length > 0
                         ? Math.round(
-                            (activeTopic.resources.filter((r) => r.status === "Finished").length /
-                              activeTopic.resources.length) *
+                            (renderedTopic.resources.filter((r) => r.status === "Finished").length /
+                              renderedTopic.resources.length) *
                               100
                           )
                         : 0}
@@ -3385,15 +4091,15 @@ export default function App() {
                           Math.PI *
                           28 *
                           (1 -
-                            (activeTopic.resources.length > 0
-                              ? activeTopic.resources.filter((r) => r.status === "Finished").length /
-                                activeTopic.resources.length
+                            (renderedTopic.resources.length > 0
+                              ? renderedTopic.resources.filter((r) => r.status === "Finished").length /
+                                renderedTopic.resources.length
                               : 0))
                         }`}
                       />
                     </svg>
                     <div className="progress-circle-text">
-                      {activeTopic.resources.filter((r) => r.status === "Finished").length}
+                      {renderedTopic.resources.filter((r) => r.status === "Finished").length}
                     </div>
                   </div>
                 </div>
@@ -3405,7 +4111,7 @@ export default function App() {
                   <button
                     key={tab}
                     className={`workspace-tab-btn ${activeTab === tab ? "active" : ""}`}
-                    style={{ "--accent-color": accentHex }}
+                    style={{ "--accent-color": renderedAccentHex }}
                     onClick={() => setActiveTab(tab)}
                   >
                     {tab}
@@ -3414,10 +4120,9 @@ export default function App() {
               </div>
 
               {/* Render Tab Contents */}
-              <div className="tab-content-view">
-                
-                {/* TAB 1: OVERVIEW */}
-                {activeTab === "Overview" && (
+              <div className="tab-content-view tab-turn-container">
+                <div className={`page-turn-wrapper ${tabFlipClass}`}>
+                  {renderedTab === "Overview" && (
                   <div>
                     <div className="overview-stats-grid">
                       <div className="overview-block">
@@ -3466,7 +4171,7 @@ export default function App() {
                 )}
 
                 {/* TAB 2: RESOURCES DETAIL */}
-                {activeTab === "Resources" && (
+                {renderedTab === "Resources" && (
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", flexWrap: "wrap", gap: "12px" }}>
                       <h3 className="serif" style={{ fontSize: "18px", margin: 0 }}>Workspace Resources</h3>
@@ -3564,7 +4269,7 @@ export default function App() {
                                     {(() => {
                                       const resUrl = r.url || (activeTopic?.sources?.find((s) => s.id === r.sourceId)?.url) || "";
                                       if (resUrl && (resUrl.startsWith("data:") || resUrl.startsWith("db://"))) {
-                                        return <OfflineAttachmentPreview url={resUrl} title={r.title} type={r.type} />;
+                                        return <OfflineAttachmentPreview url={resUrl} title={r.title} type={r.type} currentUser={currentUser} />;
                                       }
                                       return null;
                                     })()}
@@ -3588,7 +4293,7 @@ export default function App() {
                 )}
 
                 {/* TAB 3: NOTES */}
-                {activeTab === "Notes" && (
+                {renderedTab === "Notes" && (
                   <div>
                     <div style={{ marginBottom: "20px", display: "flex", gap: "10px" }}>
                       <textarea
@@ -3609,20 +4314,27 @@ export default function App() {
 
                     <div className="notes-grid">
                       {activeTopic.notes.slice(0, visibleNotesCount).map((n) => (
-                        <div key={n.id} className="note-card">
+                        <div 
+                          key={n.id} 
+                          className="note-card"
+                          style={{ cursor: "pointer" }}
+                          onClick={() => {
+                            setSelectedNoteModal(n);
+                          }}
+                        >
                           <div className="note-card-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                              <span className="note-card-date">{fmtDate(n.date)}</span>
                              <div style={{ display: "flex", gap: "8px" }}>
                                <button 
                                  style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
-                                 onClick={() => setEditingNote({ id: n.id, text: n.text })}
+                                 onClick={(e) => { e.stopPropagation(); setEditingNote({ id: n.id, text: n.text }); }}
                                  title="Edit Note"
                                >
                                  <Edit3 size={12} />
                                </button>
                                <button 
                                  style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
-                                 onClick={() => deleteNote(n.id)}
+                                 onClick={(e) => { e.stopPropagation(); deleteNote(n.id); }}
                                  title="Delete Note"
                                >
                                  <Trash2 size={12} />
@@ -3630,7 +4342,7 @@ export default function App() {
                              </div>
                            </div>
                            {editingNote && editingNote.id === n.id ? (
-                             <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }}>
+                             <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }} onClick={(e) => e.stopPropagation()}>
                                <textarea
                                  className="form-textarea"
                                  style={{ fontSize: "13.5px" }}
@@ -3643,16 +4355,31 @@ export default function App() {
                                 </div>
                              </div>
                            ) : (
-                             <p className="note-card-text">{n.text}</p>
+                             <p className="note-card-text">
+                               {n.text.length > 250 ? (
+                                 <>
+                                   {n.text.slice(0, 240)}...
+                                   <button 
+                                     className="text-accent hover:underline text-xs font-semibold ml-1 cursor-pointer" 
+                                     style={{ color: "var(--accent-brass)", background: "none", border: "none", padding: 0 }}
+                                     onClick={(e) => { e.stopPropagation(); setSelectedNoteModal(n); }}
+                                   >
+                                     Read More
+                                   </button>
+                                 </>
+                               ) : (
+                                 n.text
+                               )}
+                             </p>
                            )}
                           
                           {n.convertedTo ? (
-                            <span className="note-converted-badge">
+                            <span className="note-converted-badge" onClick={(e) => e.stopPropagation()}>
                               <Sparkles size={12} />
                               <span>Converted to Discovery</span>
                             </span>
                           ) : convertingNoteId === n.id ? (
-                            <div className="convert-note-form">
+                            <div className="convert-note-form" onClick={(e) => e.stopPropagation()}>
                               <div className="form-group">
                                 <label className="form-label">Discovery Title</label>
                                 <input
@@ -3685,7 +4412,8 @@ export default function App() {
                           ) : (
                             <button
                               className="btn-convert-note"
-                              onClick={() => {
+                              onClick={(e) => {
+                                      e.stopPropagation();
                                       setConvertingNoteId(n.id);
                                       setConvertTitle("");
                                       setConvertStatement(n.text);
@@ -3721,10 +4449,15 @@ export default function App() {
                 )}
 
                 {/* TAB 4: DISCOVERIES */}
-                {activeTab === "Discoveries" && (
+                {renderedTab === "Discoveries" && (
                   <div className="discoveries-grid">
                     {activeTopic.discoveries.map((d) => (
-                      <div key={d.id} className="discovery-card">
+                      <div 
+                        key={d.id} 
+                        className="discovery-card"
+                        style={{ cursor: "pointer" }}
+                        onClick={() => setSelectedDiscoveryModal(d)}
+                      >
                         {/* Verification Stamp */}
                         <div className={`verification-stamp ${d.verification === "Verified" ? "stamp-verified" : "stamp-unverified"}`}>
                           {d.verification === "Verified" ? <CheckCircle2 size={14} /> : <Circle size={14} />}
@@ -3736,20 +4469,26 @@ export default function App() {
                           <div style={{ display: "flex", gap: "8px", flexShrink: 0 }}>
                             <button
                               style={{ background: "none", border: "none", color: "var(--text-dim)", cursor: "pointer" }}
-                              onClick={() => setEditingDiscovery({
-                                id: d.id,
-                                title: d.title,
-                                statement: d.statement,
-                                verification: d.verification,
-                                visibility: d.visibility
-                              })}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingDiscovery({
+                                  id: d.id,
+                                  title: d.title,
+                                  statement: d.statement,
+                                  verification: d.verification,
+                                  visibility: d.visibility
+                                });
+                              }}
                               title="Edit Discovery"
                             >
                               <Edit3 size={13} style={{ display: "block" }} />
                             </button>
                             <button
                               style={{ background: "none", border: "none", color: "var(--accent-garnet)", cursor: "pointer" }}
-                              onClick={() => deleteDiscovery(d.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteDiscovery(d.id);
+                              }}
                               title="Delete Discovery"
                             >
                               <Trash2 size={13} style={{ display: "block" }} />
@@ -3785,7 +4524,8 @@ export default function App() {
                           <span className="discovery-date">{fmtDate(d.date)}</span>
                           <button
                             style={{ background: "none", border: "none", color: "var(--text-secondary)", cursor: "pointer" }}
-                            onClick={() => {
+                            onClick={(e) => {
+                              e.stopPropagation();
                               setTopics((prev) =>
                                 prev.map((t) => {
                                   if (t.id !== activeTopicId) return t;
@@ -3821,7 +4561,7 @@ export default function App() {
                 )}
 
                 {/* TAB 5: SOURCES */}
-                {activeTab === "Sources" && (
+                {renderedTab === "Sources" && (
                   <div className="sources-list-view">
                     {activeTopic.sources.length === 0 ? (
                       <div className="empty-state">
@@ -3859,7 +4599,7 @@ export default function App() {
                              </div>
                            </div>
                            {s.url && (s.url.startsWith("data:") || s.url.startsWith("db://")) && (
-                             <OfflineAttachmentPreview url={s.url} title={s.title} type={s.type} />
+                             <OfflineAttachmentPreview url={s.url} title={s.title} type={s.type} currentUser={currentUser} />
                            )}
                          </div>
                       ))
@@ -3868,7 +4608,7 @@ export default function App() {
                 )}
 
                 {/* TAB 6: TIMELINE */}
-                {activeTab === "Timeline" && (
+                {renderedTab === "Timeline" && (
                   <div className="timeline-list">
                     {activeTopic.timeline.map((event, idx) => (
                       <div key={idx} className="timeline-event-item" style={{ "--accent-color": accentHex }}>
@@ -3879,7 +4619,7 @@ export default function App() {
                     ))}
                   </div>
                 )}
-
+                </div>
               </div>
             </div>
 
@@ -3943,8 +4683,11 @@ export default function App() {
             </aside>
           </div>
         )}
+        </div>
+        </div>
 
         {/* 2.5 RADIAL DOCK NAVIGATION */}
+        <div className="scroll-boundary-line" />
         <div 
           className="radial-dock-container"
           onWheel={handleRingWheel}
@@ -4428,6 +5171,24 @@ export default function App() {
                   </form>
 
                   <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
+                    <h4 style={{ fontSize: "13.5px", fontWeight: "600", color: "var(--accent-brass)", marginBottom: "12px" }}>⚡ Guided Pacing Averages</h4>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "10px", marginBottom: "14px" }}>
+                      <div style={{ background: "rgba(255,255,255,0.02)", padding: "10px", borderRadius: "6px", border: "1px solid var(--border-light)", textAlign: "center" }}>
+                        <div style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
+                          {localStorage.getItem("pacing_global_reading_wpm") || "200"}
+                        </div>
+                        <div style={{ fontSize: "10px", color: "var(--text-dim)", textTransform: "uppercase", marginTop: "2px" }}>Reading WPM</div>
+                      </div>
+                      <div style={{ background: "rgba(255,255,255,0.02)", padding: "10px", borderRadius: "6px", border: "1px solid var(--border-light)", textAlign: "center" }}>
+                        <div style={{ fontSize: "18px", fontWeight: "700", color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
+                          {localStorage.getItem("pacing_global_writing_wpm") || "40"}
+                        </div>
+                        <div style={{ fontSize: "10px", color: "var(--text-dim)", textTransform: "uppercase", marginTop: "2px" }}>Writing WPM</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
                     <h4 style={{ fontSize: "13px", fontWeight: "600", color: "var(--accent-garnet)", marginBottom: "8px" }}>Danger Zone</h4>
                     <button className="btn-solid" style={{ background: "var(--accent-garnet)", color: "white", width: "100%" }} onClick={handleClearAllData}>
                       Clear All Vault Data
@@ -4440,44 +5201,100 @@ export default function App() {
               {settingsTab === "sync" && (
                 <>
                   <div>
-                    <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Smart Sync (Cloud Vault)</h4>
-                    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
-                      <input
-                        type="text"
-                        placeholder="WebDAV URL (e.g. https://domain.com/remote.php/dav/files/user/)"
-                        className="form-input"
-                        value={ncUrl}
-                        onChange={(e) => setNcUrl(e.target.value)}
-                      />
-                      <div style={{ display: "flex", gap: "8px" }}>
+                    <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Cloud Sync Provider</h4>
+                    <div style={{ display: "flex", gap: "8px", marginBottom: "15px" }}>
+                      <button 
+                        className={`desktop-app-btn ${syncProvider === "nextcloud" ? "active" : ""}`}
+                        style={{ flex: 1, background: syncProvider === "nextcloud" ? "rgba(255,255,255,0.1)" : "transparent", border: syncProvider === "nextcloud" ? "1px solid var(--accent-brass)" : "1px solid transparent" }}
+                        onClick={() => setSyncProvider("nextcloud")}
+                      >
+                        Nextcloud WebDAV
+                      </button>
+                      <button 
+                        className={`desktop-app-btn ${syncProvider === "gdrive" ? "active" : ""}`}
+                        style={{ flex: 1, background: syncProvider === "gdrive" ? "rgba(255,255,255,0.1)" : "transparent", border: syncProvider === "gdrive" ? "1px solid var(--accent-brass)" : "1px solid transparent" }}
+                        onClick={() => setSyncProvider("gdrive")}
+                      >
+                        Google Drive
+                      </button>
+                    </div>
+
+                    {syncProvider === "nextcloud" ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
                         <input
                           type="text"
-                          placeholder="Username"
+                          placeholder="WebDAV URL (e.g. https://domain.com/remote.php/dav/files/user/)"
                           className="form-input"
-                          style={{ flex: 1 }}
-                          value={ncUser}
-                          onChange={(e) => setNcUser(e.target.value)}
+                          value={ncUrl}
+                          onChange={(e) => setNcUrl(e.target.value)}
                         />
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <input
+                            type="text"
+                            placeholder="Username"
+                            className="form-input"
+                            style={{ flex: 1 }}
+                            value={ncUser}
+                            onChange={(e) => setNcUser(e.target.value)}
+                          />
+                          <input
+                            type="password"
+                            placeholder="App Password"
+                            className="form-input"
+                            style={{ flex: 1 }}
+                            value={ncPass}
+                            onChange={(e) => setNcPass(e.target.value)}
+                          />
+                        </div>
                         <input
-                          type="password"
-                          placeholder="App Password"
+                          type="text"
+                          placeholder="Backup Path (e.g. vault_backup.json)"
                           className="form-input"
-                          style={{ flex: 1 }}
-                          value={ncPass}
-                          onChange={(e) => setNcPass(e.target.value)}
+                          value={ncPath}
+                          onChange={(e) => setNcPath(e.target.value)}
                         />
                       </div>
-                      <input
-                        type="text"
-                        placeholder="Backup Path (e.g. vault_backup.json)"
-                        className="form-input"
-                        value={ncPath}
-                        onChange={(e) => setNcPath(e.target.value)}
-                      />
-                    </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "10px" }}>
+                        {gdriveToken ? (
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", padding: "8px", borderRadius: "6px" }}>
+                            <span style={{ fontSize: "11px", color: "var(--text-primary)" }}>
+                              Linked: <strong>{gdriveEmail || "Active Session"}</strong>
+                            </span>
+                            <button className="desktop-app-btn" style={{ background: "rgba(255,0,0,0.1)", color: "#ff8888", padding: "4px 8px" }} onClick={handleDisconnectGDrive}>
+                              Disconnect
+                            </button>
+                          </div>
+                        ) : (
+                          <button className="desktop-app-btn" style={{ background: "var(--accent-brass)", color: "black", fontWeight: "600" }} onClick={handleConnectGDrive}>
+                            Link Google Drive Account
+                          </button>
+                        )}
+
+                        <div style={{ marginTop: "4px" }}>
+                          <button 
+                            className="desktop-app-btn" 
+                            style={{ background: "transparent", fontSize: "10px", color: "var(--text-dim)", width: "100%", padding: "2px", border: "none" }}
+                            onClick={() => setShowAdvancedSync(!showAdvancedSync)}
+                          >
+                            {showAdvancedSync ? "Hide Custom Client Settings" : "Configure Custom OAuth Client ID"}
+                          </button>
+                          {showAdvancedSync && (
+                            <input
+                              type="text"
+                              placeholder="Custom Google OAuth Client ID (Leave blank to use default)"
+                              className="form-input"
+                              style={{ marginTop: "6px", fontSize: "11.5px" }}
+                              value={gdriveClientId}
+                              onChange={(e) => setGdriveClientId(e.target.value)}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    )}
                     
-                    <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
-                      <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={syncToNextcloud} disabled={syncStatus === "Syncing"}>
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center", marginTop: "12px" }}>
+                      <button className="desktop-app-btn" style={{ flex: 1, background: "var(--accent-verdigris)", color: "white" }} onClick={runSmartSync} disabled={syncStatus === "Syncing"}>
                         {syncStatus === "Syncing" ? "Syncing..." : "Smart Sync Vault"}
                       </button>
                     </div>
@@ -4518,7 +5335,7 @@ export default function App() {
                   <div style={{ borderTop: "1px solid var(--border-light)", paddingTop: "14px" }}>
                     <h4 style={{ fontSize: "13px", fontWeight: "600", marginBottom: "8px" }}>Backup Management</h4>
                     <div style={{ display: "flex", gap: "10px" }}>
-                      <button className="desktop-app-btn" style={{ flex: 1 }} onClick={exportData}>Export JSON Vault</button>
+                      <button className="desktop-app-btn" style={{ flex: 1 }} onClick={() => setExportModalOpen(true)}>Export JSON Vault</button>
                       <label className="desktop-app-btn" style={{ flex: 1, cursor: "pointer", textAlign: "center" }}>
                         Import Backup
                         <input type="file" accept=".json" onChange={importData} style={{ display: "none" }} />
@@ -4698,6 +5515,53 @@ export default function App() {
         </div>
       )}
 
+      {/* Pacing Complete Celebration Modal */}
+      {pacingCompletedStats && (
+        <div className="modal-overlay" onClick={() => setPacingCompletedStats(null)}>
+          <div className="modal-card" style={{ maxWidth: "420px", textAlign: "center", padding: "30px", borderRadius: "16px", background: "linear-gradient(135deg, var(--bg-modal), rgba(201, 151, 77, 0.05))", border: "1px solid var(--accent-brass)", boxShadow: "0 20px 40px rgba(0,0,0,0.5)" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ fontSize: "50px", marginBottom: "10px" }}>🎉</div>
+            <h3 className="serif" style={{ fontSize: "22px", fontWeight: "700", color: "var(--accent-brass)", margin: "0 0 10px 0" }}>
+              Pacing Session Complete!
+            </h3>
+            <p style={{ fontSize: "14px", color: "var(--text-secondary)", marginBottom: "20px" }}>
+              Fantastic work! You've successfully finished training in <strong>{pacingCompletedStats.mode === "writing" ? "Writing Mode" : "Reading Mode"}</strong>.
+            </p>
+            
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px", marginBottom: "24px" }}>
+              <div style={{ background: "rgba(255,255,255,0.02)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-light)" }}>
+                <div style={{ fontSize: "20px", fontWeight: "700", color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
+                  {pacingCompletedStats.wpm}
+                </div>
+                <div style={{ fontSize: "11px", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: "4px" }}>
+                  Words / Min (WPM)
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.02)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-light)" }}>
+                <div style={{ fontSize: "20px", fontWeight: "700", color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
+                  {pacingCompletedStats.cps}
+                </div>
+                <div style={{ fontSize: "11px", color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.05em", marginTop: "4px" }}>
+                  Chars / Sec (CPS)
+                </div>
+              </div>
+              <div style={{ background: "rgba(255,255,255,0.02)", padding: "12px", borderRadius: "8px", border: "1px solid var(--border-light)", gridColumn: "span 2" }}>
+                <div style={{ fontSize: "13px", color: "var(--text-secondary)" }}>
+                  Processed <strong>{pacingCompletedStats.words}</strong> words ({pacingCompletedStats.chars} characters) in <strong>{pacingCompletedStats.time}s</strong>.
+                </div>
+              </div>
+            </div>
+            
+            <button
+              className="btn-solid"
+              style={{ background: "var(--accent-brass)", color: "black", width: "100%", padding: "10px", fontWeight: "600", border: "none" }}
+              onClick={() => setPacingCompletedStats(null)}
+            >
+              Great Work
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Custom Confirm Dialog Modal */}
       {confirmDialog && (
         <div className="modal-overlay" onClick={() => setConfirmDialog(null)}>
@@ -4721,6 +5585,549 @@ export default function App() {
                   }}
                 >
                   Confirm
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Selected Note details Popup Modal */}
+      {selectedNoteModal && (
+        <div className="modal-overlay" onClick={() => setSelectedNoteModal(null)}>
+          <div className="modal-card" style={{ maxWidth: "600px", width: "90%" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>📝 Note Details</span>
+              </h3>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginRight: "12px" }}>
+                {!pacingActive && (
+                  <button
+                    className="btn-ghost"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      padding: "4px 8px",
+                      fontSize: "12px",
+                      borderColor: "var(--accent-brass)",
+                      color: "var(--accent-brass)"
+                    }}
+                    onClick={() => startPacingSession(selectedNoteModal)}
+                    title="Start guided reading pacing session"
+                  >
+                    ⚡ Pacing Mode
+                  </button>
+                )}
+              </div>
+              <button className="drawer-close-btn" onClick={() => { setSelectedNoteModal(null); setPacingActive(false); }}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "75vh" }}>
+              <span className="note-card-date" style={{ display: "block", marginBottom: "12px" }}>
+                {fmtDate(selectedNoteModal.date)}
+              </span>
+              {pacingActive && pacingTargetId === selectedNoteModal.id ? (
+                <div className="pacing-text-display" style={{ fontSize: "15px", lineHeight: "1.7", overflowY: "auto", maxHeight: "40vh", paddingRight: "8px", marginBottom: "16px" }}>
+                  {pacingSentences.map((sentenceObj, idx) => {
+                    const isHighlighted = idx === pacingCurrentIndex;
+                    return (
+                      <span key={idx}>
+                        <span
+                          className={isHighlighted ? "pacing-highlighted-sentence" : "pacing-dimmed-text"}
+                          style={{
+                            transition: "all 0.3s ease",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => {
+                            setPacingCurrentIndex(idx);
+                            const target = calculateTargetTime(sentenceObj.text, pacingSpeedMultiplier);
+                            setPacingTargetTime(target);
+                            setPacingTimeRemaining(target);
+                            setPacingTimeSpent(0);
+                            setPacingInBreak(false);
+                          }}
+                        >
+                          {sentenceObj.text}{" "}
+                        </span>
+                        {sentenceObj.isLastInParagraph && <div style={{ height: "14px" }} />}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="note-card-text" style={{ fontSize: "14.5px", whiteSpace: "pre-wrap", overflowY: "auto", maxHeight: "45vh", paddingRight: "8px" }}>
+                  {selectedNoteModal.text}
+                </p>
+              )}
+
+              {pacingActive && pacingTargetId === selectedNoteModal.id && (
+                <div className="pacing-hud-container" style={{
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "8px",
+                  padding: "12px",
+                  marginTop: "16px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "10px",
+                  boxShadow: "0 4px 20px rgba(0,0,0,0.3)"
+                }}>
+                  {pacingInBreak ? (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", padding: "8px 0", textAlign: "center" }}>
+                      <span style={{ fontSize: "14px", fontWeight: "600", color: "var(--accent-brass)", display: "flex", alignItems: "center", gap: "6px" }}>
+                        ☕ Finger Rest Break
+                      </span>
+                      <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                        Take a moment to rest. Auto-resuming in <strong>{pacingBreakTimer}s</strong>...
+                      </span>
+                      <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+                        <button
+                          className="btn-solid"
+                          style={{ background: "var(--accent-verdigris)", color: "white", padding: "4px 12px", fontSize: "12px", fontWeight: "600" }}
+                          onClick={() => {
+                            setPacingInBreak(false);
+                            const nextSentence = pacingSentences[pacingCurrentIndex];
+                            if (nextSentence) {
+                              const nextTarget = calculateTargetTime(nextSentence.text, pacingSpeedMultiplier);
+                              setPacingTargetTime(nextTarget);
+                              setPacingTimeRemaining(nextTarget);
+                              setPacingTimeSpent(0);
+                            }
+                          }}
+                        >
+                          Skip Rest / Resume
+                        </button>
+                        <button
+                          className="btn-ghost"
+                          style={{ padding: "4px 8px", fontSize: "12px", color: "var(--accent-garnet)" }}
+                          onClick={() => { setPacingActive(false); setPacingInBreak(false); }}
+                        >
+                          Exit
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px" }}>
+                        <span style={{ color: "var(--text-secondary)" }}>
+                          Sentence <strong>{pacingCurrentIndex + 1}</strong> of <strong>{pacingSentences.length}</strong>
+                        </span>
+                        <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span className="mono" style={{ background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: "4px", color: "var(--accent-brass)" }}>
+                            {pacingSpeedMultiplier.toFixed(2)}x Speed
+                          </span>
+                          <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>
+                            PID Active
+                          </span>
+                        </span>
+                      </div>
+                      
+                      {pacingMode === "writing" && (
+                        <div style={{
+                          background: "rgba(255,255,255,0.05)",
+                          height: "6px",
+                          borderRadius: "3px",
+                          overflow: "hidden",
+                          position: "relative"
+                        }}>
+                          <div style={{
+                            width: `${((pacingTargetTime - pacingTimeRemaining) / pacingTargetTime) * 100}%`,
+                            height: "100%",
+                            background: "linear-gradient(90deg, var(--accent-verdigris), var(--accent-brass))",
+                            transition: "width 1s linear"
+                          }} />
+                        </div>
+                      )}
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span className="mono" style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                          {pacingMode === "writing" ? (
+                            `Timer: ${pacingTimeRemaining}s remaining (Target: ${pacingTargetTime}s)`
+                          ) : (
+                            "🔊 Narration active (transitions when finished)..."
+                          )}
+                        </span>
+                        
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px", borderColor: "var(--accent-verdigris)", color: "var(--accent-verdigris)" }}
+                            onClick={togglePacingMode}
+                          >
+                            {pacingMode === "writing" ? "✍ Writing Mode" : "📖 Reading Mode"}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px" }}
+                            onClick={handlePacingPrev}
+                            disabled={pacingCurrentIndex === 0}
+                          >
+                            Prev
+                          </button>
+                          <button
+                            className="btn-solid"
+                            style={{ background: "var(--accent-brass)", color: "black", padding: "4px 12px", fontSize: "12px", fontWeight: "600" }}
+                            onClick={() => setPacingIsPlaying(!pacingIsPlaying)}
+                          >
+                            {pacingIsPlaying ? "Pause" : "Play"}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px" }}
+                            onClick={() => handlePacingNext(false)}
+                          >
+                            Next
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px", color: "var(--accent-garnet)" }}
+                            onClick={() => setPacingActive(false)}
+                          >
+                            Exit
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+              
+              {selectedNoteModal.convertedTo && (
+                <div className="note-converted-badge" style={{ marginTop: "16px" }}>
+                  <Sparkles size={12} />
+                  <span>Converted to Discovery</span>
+                </div>
+              )}
+              
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "24px", borderTop: "1px solid var(--border-color)", paddingTop: "16px" }}>
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setEditingNote({ id: selectedNoteModal.id, text: selectedNoteModal.text });
+                    setSelectedNoteModal(null);
+                  }}
+                >
+                  Edit Note
+                </button>
+                <button
+                  className="btn-solid"
+                  style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }}
+                  onClick={() => { setSelectedNoteModal(null); setPacingActive(false); }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Discovery Details Modal */}
+      {selectedDiscoveryModal && (
+        <div className="modal-overlay" onClick={() => { setSelectedDiscoveryModal(null); setPacingActive(false); }}>
+          <div className="modal-card" style={{ maxWidth: "600px", width: "90%" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>💡 Discovery Details</span>
+              </h3>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", marginRight: "12px" }}>
+                {!pacingActive && (
+                  <button
+                    className="btn-ghost"
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "6px",
+                      padding: "4px 8px",
+                      fontSize: "12px",
+                      borderColor: "var(--accent-brass)",
+                      color: "var(--accent-brass)"
+                    }}
+                    onClick={() => startPacingSession(selectedDiscoveryModal)}
+                    title="Start guided reading pacing session"
+                  >
+                    ⚡ Pacing Mode
+                  </button>
+                )}
+              </div>
+              <button className="drawer-close-btn" onClick={() => { setSelectedDiscoveryModal(null); setPacingActive(false); }}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ maxHeight: "75vh" }}>
+              <h4 className="serif" style={{ fontSize: "18px", color: "var(--text-primary)", marginBottom: "8px" }}>
+                {selectedDiscoveryModal.title}
+              </h4>
+              <span className="note-card-date" style={{ display: "block", marginBottom: "12px" }}>
+                {fmtDate(selectedDiscoveryModal.date)} • {selectedDiscoveryModal.verification}
+              </span>
+              
+              {pacingActive && pacingTargetId === selectedDiscoveryModal.id ? (
+                <div className="pacing-text-display" style={{ fontSize: "15px", lineHeight: "1.7", overflowY: "auto", maxHeight: "40vh", paddingRight: "8px", marginBottom: "16px" }}>
+                  {pacingSentences.map((sentenceObj, idx) => {
+                    const isHighlighted = idx === pacingCurrentIndex;
+                    return (
+                      <span key={idx}>
+                        <span
+                          className={isHighlighted ? "pacing-highlighted-sentence" : "pacing-dimmed-text"}
+                          style={{
+                            transition: "all 0.3s ease",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => {
+                            setPacingCurrentIndex(idx);
+                            const target = calculateTargetTime(sentenceObj.text, pacingSpeedMultiplier);
+                            setPacingTargetTime(target);
+                            setPacingTimeRemaining(target);
+                            setPacingTimeSpent(0);
+                            setPacingInBreak(false);
+                          }}
+                        >
+                          {sentenceObj.text}{" "}
+                        </span>
+                        {sentenceObj.isLastInParagraph && <div style={{ height: "14px" }} />}
+                      </span>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="discovery-statement" style={{ fontSize: "14.5px", whiteSpace: "pre-wrap", overflowY: "auto", maxHeight: "45vh", paddingRight: "8px" }}>
+                  {selectedDiscoveryModal.statement}
+                </p>
+              )}
+
+              {pacingActive && pacingTargetId === selectedDiscoveryModal.id && (
+                <div className="pacing-hud-container" style={{
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: "8px",
+                  padding: "12px",
+                  marginTop: "16px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "10px",
+                  boxShadow: "0 4px 20px rgba(0,0,0,0.3)"
+                }}>
+                  {pacingInBreak ? (
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "8px", padding: "8px 0", textAlign: "center" }}>
+                      <span style={{ fontSize: "14px", fontWeight: "600", color: "var(--accent-brass)", display: "flex", alignItems: "center", gap: "6px" }}>
+                        ☕ Finger Rest Break
+                      </span>
+                      <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+                        Take a moment to rest. Auto-resuming in <strong>{pacingBreakTimer}s</strong>...
+                      </span>
+                      <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+                        <button
+                          className="btn-solid"
+                          style={{ background: "var(--accent-verdigris)", color: "white", padding: "4px 12px", fontSize: "12px", fontWeight: "600" }}
+                          onClick={() => {
+                            setPacingInBreak(false);
+                            const nextSentence = pacingSentences[pacingCurrentIndex];
+                            if (nextSentence) {
+                              const nextTarget = calculateTargetTime(nextSentence.text, pacingSpeedMultiplier);
+                              setPacingTargetTime(nextTarget);
+                              setPacingTimeRemaining(nextTarget);
+                              setPacingTimeSpent(0);
+                            }
+                          }}
+                        >
+                          Skip Rest / Resume
+                        </button>
+                        <button
+                          className="btn-ghost"
+                          style={{ padding: "4px 8px", fontSize: "12px", color: "var(--accent-garnet)" }}
+                          onClick={() => { setPacingActive(false); setPacingInBreak(false); }}
+                        >
+                          Exit
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "12px" }}>
+                        <span style={{ color: "var(--text-secondary)" }}>
+                          Sentence <strong>{pacingCurrentIndex + 1}</strong> of <strong>{pacingSentences.length}</strong>
+                        </span>
+                        <span style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                          <span className="mono" style={{ background: "rgba(255,255,255,0.05)", padding: "2px 6px", borderRadius: "4px", color: "var(--accent-brass)" }}>
+                            {pacingSpeedMultiplier.toFixed(2)}x Speed
+                          </span>
+                          <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>
+                            PID Active
+                          </span>
+                        </span>
+                      </div>
+                      
+                      {pacingMode === "writing" && (
+                        <div style={{
+                          background: "rgba(255,255,255,0.05)",
+                          height: "6px",
+                          borderRadius: "3px",
+                          overflow: "hidden",
+                          position: "relative"
+                        }}>
+                          <div style={{
+                            width: `${((pacingTargetTime - pacingTimeRemaining) / pacingTargetTime) * 100}%`,
+                            height: "100%",
+                            background: "linear-gradient(90deg, var(--accent-verdigris), var(--accent-brass))",
+                            transition: "width 1s linear"
+                          }} />
+                        </div>
+                      )}
+
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span className="mono" style={{ fontSize: "11px", color: "var(--text-dim)" }}>
+                          {pacingMode === "writing" ? (
+                            `Timer: ${pacingTimeRemaining}s remaining (Target: ${pacingTargetTime}s)`
+                          ) : (
+                            "🔊 Narration active (transitions when finished)..."
+                          )}
+                        </span>
+                        
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px", borderColor: "var(--accent-verdigris)", color: "var(--accent-verdigris)" }}
+                            onClick={togglePacingMode}
+                          >
+                            {pacingMode === "writing" ? "✍ Writing Mode" : "📖 Reading Mode"}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px" }}
+                            onClick={handlePacingPrev}
+                            disabled={pacingCurrentIndex === 0}
+                          >
+                            Prev
+                          </button>
+                          <button
+                            className="btn-solid"
+                            style={{ background: "var(--accent-brass)", color: "black", padding: "4px 12px", fontSize: "12px", fontWeight: "600" }}
+                            onClick={() => setPacingIsPlaying(!pacingIsPlaying)}
+                          >
+                            {pacingIsPlaying ? "Pause" : "Play"}
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px" }}
+                            onClick={() => handlePacingNext(false)}
+                          >
+                            Next
+                          </button>
+                          <button
+                            className="btn-ghost"
+                            style={{ padding: "4px 8px", fontSize: "12px", color: "var(--accent-garnet)" }}
+                            onClick={() => setPacingActive(false)}
+                          >
+                            Exit
+                          </button>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: "10px", marginTop: "24px", borderTop: "1px solid var(--border-color)", paddingTop: "16px" }}>
+                <button
+                  className="btn-ghost"
+                  onClick={() => {
+                    setEditingDiscovery({
+                      id: selectedDiscoveryModal.id,
+                      title: selectedDiscoveryModal.title,
+                      statement: selectedDiscoveryModal.statement,
+                      verification: selectedDiscoveryModal.verification,
+                      visibility: selectedDiscoveryModal.visibility
+                    });
+                    setSelectedDiscoveryModal(null);
+                  }}
+                >
+                  Edit Discovery
+                </button>
+                <button
+                  className="btn-solid"
+                  style={{ background: "var(--accent-brass)", color: "black", padding: "6px 16px", borderRadius: "4px" }}
+                  onClick={() => { setSelectedDiscoveryModal(null); setPacingActive(false); }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Export Options Modal */}
+      {exportModalOpen && (
+        <div className="modal-overlay" onClick={() => setExportModalOpen(false)}>
+          <div className="modal-card" style={{ maxWidth: "420px" }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3 className="modal-title" style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <span>💾 Export Research Vault</span>
+              </h3>
+              <button className="drawer-close-btn" onClick={() => setExportModalOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+              <p style={{ fontSize: "13px", color: "var(--text-secondary)", lineHeight: "1.5" }}>
+                Choose your backup type. A structure-only backup is fast and lightweight, while a full backup includes offline files.
+              </p>
+              
+              <div 
+                style={{ 
+                  background: "rgba(255, 255, 255, 0.02)", 
+                  border: "1px solid var(--border-color)", 
+                  borderRadius: "8px", 
+                  padding: "12px", 
+                  cursor: "pointer",
+                  transition: "background 0.2s" 
+                }}
+                className="export-option-card"
+                onClick={() => {
+                  exportData(false);
+                  setExportModalOpen(false);
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", fontWeight: "600", fontSize: "14px", color: "var(--text-primary)" }}>
+                  <FileText size={18} style={{ color: "var(--accent-brass)" }} />
+                  <span>Structure & Notes Only</span>
+                </div>
+                <p style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "6px", marginLeft: "28px" }}>
+                  Fastest export. Backs up all research topics, text notes, discoveries, bibliography items, and metadata logs. Excludes large offline files.
+                </p>
+              </div>
+
+              <div 
+                style={{ 
+                  background: "rgba(255, 255, 255, 0.02)", 
+                  border: "1px solid var(--border-color)", 
+                  borderRadius: "8px", 
+                  padding: "12px", 
+                  cursor: "pointer",
+                  transition: "background 0.2s" 
+                }}
+                className="export-option-card"
+                onClick={() => {
+                  exportData(true);
+                  setExportModalOpen(false);
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", fontWeight: "600", fontSize: "14px", color: "var(--text-primary)" }}>
+                  <Database size={18} style={{ color: "var(--accent-purple)" }} />
+                  <span>Full Vault Backup</span>
+                </div>
+                <p style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "6px", marginLeft: "28px" }}>
+                  Complete archive. Includes everything from the structure backup, plus all offline image attachments, audio files, and PDFs stored in IndexedDB.
+                </p>
+              </div>
+              
+              <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "10px" }}>
+                <button className="btn-ghost" onClick={() => setExportModalOpen(false)}>
+                  Cancel
                 </button>
               </div>
             </div>
